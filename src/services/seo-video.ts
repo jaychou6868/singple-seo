@@ -215,26 +215,9 @@ async function analyzeVideoWithGemini(
   const analysisUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
   const videoFilePart = { fileData: { mimeType: 'video/mp4', fileUri } };
 
-  // 判斷是否需要轉錄（>1 分鐘的長影片才轉錄）
-  const isLong = job.video_type === 'long' || fileSize > LARGE_FILE_THRESHOLD;
-  await updateJobProgress(jobId, 20, 'analyzing', isLong ? '轉錄 + 分析影片中（並行）...' : '分析影片中...', onProgress);
+  // 只做內容分析（文字轉錄留到未來 YouTube 縮圖功能再加）
+  await updateJobProgress(jobId, 20, 'analyzing', '分析影片中...', onProgress);
 
-  // 轉錄 Promise（短影片跳過）
-  const transcribePromise = isLong ? fetch(analysisUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{
-        parts: [
-          videoFilePart,
-          { text: '請將這支影片中所有的口白（說話內容）完整轉錄成繁體中文文字。逐字轉錄，保留語氣詞、口語表達、停頓。只輸出轉錄文字，不要加任何分析或格式。' },
-        ],
-      }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 65536 },
-    }),
-  }).then(r => r.json() as Promise<any>) : Promise.resolve(null);
-
-  // 分析 Promise
   const analyzePromise = fetch(analysisUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -266,18 +249,8 @@ async function analyzeVideoWithGemini(
     }),
   }).then(r => r.json() as Promise<any>);
 
-  // 並行執行
-  const [transcribeData, analysisData] = await Promise.all([transcribePromise, analyzePromise]);
-
-  // 解析轉錄結果（短影片無轉錄）
-  let transcript = '';
-  if (transcribeData) {
-    const transcribeParts = transcribeData?.candidates?.[0]?.content?.parts || [];
-    for (let i = transcribeParts.length - 1; i >= 0; i--) {
-      if (transcribeParts[i].text) { transcript = transcribeParts[i].text; break; }
-    }
-    console.log(`[SEO] Transcript: ${transcript.length} chars`);
-  }
+  const analysisData = await analyzePromise;
+  const transcript = '';
 
   // 解析分析結果
   const analysisParts = analysisData?.candidates?.[0]?.content?.parts || [];
