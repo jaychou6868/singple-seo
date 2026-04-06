@@ -13,7 +13,7 @@ import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { Storage } from '@google-cloud/storage';
 import { createClient } from '@supabase/supabase-js';
-import { processVideoSeo, deleteGcsObject } from './seo-video.js';
+import { processVideoSeo, deleteGcsObject, extractThumbnailTimestamps } from './seo-video.js';
 import { runViralLearner, testViralLearnerSave } from './viral-learner.js';
 import { runThumbnailLearner } from './thumbnail-learner.js';
 import { generateThumbnails } from './thumbnail-generator.js';
@@ -375,6 +375,44 @@ seoRoutes.post('/thumbnail/generate', async (c) => {
     console.error('Thumbnail generation error:', err);
     return c.json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
   }
+});
+
+// ── Thumbnail: Debug test timestamp extraction ────────────
+
+seoRoutes.get('/thumbnail/test-timestamps/:jobId', async (c) => {
+  const jobId = c.req.param('jobId');
+  const { data: job } = await supabase.from('seo_jobs').select('file_key').eq('id', jobId).single();
+  if (!job?.file_key) return c.json({ error: 'Job not found or no file_key' }, 404);
+
+  // Re-register the GCS file with Gemini (same as in analyzeVideoWithGemini)
+  const { GoogleAuth } = await import('google-auth-library');
+  let storageOptions: any = {};
+  if (process.env.GCS_KEY_JSON) {
+    storageOptions = JSON.parse(Buffer.from(process.env.GCS_KEY_JSON, 'base64').toString());
+  }
+  const auth = new GoogleAuth({ credentials: storageOptions, scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+  const client = await auth.getClient();
+  const tokenRes = await client.getAccessToken();
+
+  const registerRes = await fetch('https://generativelanguage.googleapis.com/v1beta/files:register', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${tokenRes.token}`,
+      'x-goog-user-project': 'gen-lang-client-0010622782',
+    },
+    body: JSON.stringify({ uris: [job.file_key] }),
+  });
+  const registerData = await registerRes.json() as any;
+  const fileUri = registerData?.files?.[0]?.uri;
+  if (!fileUri) return c.json({ error: 'GCS register failed', detail: registerData }, 500);
+
+  // Wait for propagation
+  await new Promise(r => setTimeout(r, 3000));
+
+  // Call extractThumbnailTimestamps
+  const timestamps = await extractThumbnailTimestamps(fileUri);
+  return c.json({ ok: true, fileUri, timestamps, count: timestamps.length });
 });
 
 // ── Thumbnail: Get candidates ─────────────────────────────

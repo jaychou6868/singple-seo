@@ -234,7 +234,7 @@ async function analyzeVideoWithGemini(
 
 // ── Thumbnail Frame Timestamps (separate Gemini call) ───────
 
-async function extractThumbnailTimestamps(
+export async function extractThumbnailTimestamps(
   fileUri: string,
 ): Promise<{ timestamp: number; description: string }[]> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
