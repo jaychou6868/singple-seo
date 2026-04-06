@@ -162,9 +162,6 @@ async function callGeminiImage(prompt: string): Promise<string> {
       responseModalities: ['TEXT', 'IMAGE'],
       temperature: 0.9,
     },
-    imageConfig: {
-      aspectRatio: '16:9',
-    },
   };
 
   const controller = new AbortController();
