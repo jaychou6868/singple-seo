@@ -1363,13 +1363,25 @@ async function triggerViralLearn() {
     }
 }
 
-function loadViralLearnStatus() {
-    const saved = localStorage.getItem('lastViralLearn');
+async function loadViralLearnStatus() {
     const statusEl = document.getElementById('lastLearnTime');
-    if (saved) {
-        statusEl.textContent = '上次學習：' + saved;
-    } else {
-        statusEl.textContent = '上次學習：尚未執行';
+    try {
+        const res = await fetch(SEO_BASE + '/api/seo/kb-status');
+        const data = await res.json();
+        const tracker = (data.trackers || []).find(t => t.id === 'viral_learner');
+        const lastRun = tracker?.data?.last_run;
+        if (lastRun) {
+            const d = new Date(lastRun);
+            const formatted = d.toLocaleString('zh-TW', { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
+            const totalRuns = tracker.data.total_runs || 0;
+            const exCount = data.examples?.count || 0;
+            statusEl.textContent = `上次學習：${formatted}（已執行 ${totalRuns} 次，${exCount} 條範例）`;
+        } else {
+            statusEl.textContent = '上次學習：尚未執行';
+        }
+    } catch {
+        const saved = localStorage.getItem('lastViralLearn');
+        statusEl.textContent = saved ? '上次學習：' + saved : '上次學習：尚未執行';
     }
 }
 
