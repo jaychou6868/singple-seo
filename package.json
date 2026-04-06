@@ -1,0 +1,22 @@
+{
+  "name": "singple-seo",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1024.0",
+    "@aws-sdk/s3-request-presigner": "^3.1024.0",
+    "@hono/node-server": "^1.19.12",
+    "@supabase/supabase-js": "^2.100.1",
+    "hono": "^4.12.9",
+    "nanoid": "^5.1.7"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "typescript": "^6.0.2"
+  }
+}
