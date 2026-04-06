@@ -1,9 +1,7 @@
 /**
  * SEO Video API Routes — Hono 路由
  *
- * POST /api/seo/upload/init      → R2 multipart upload 初始化
- * POST /api/seo/upload/presign   → 取得 chunk presigned URLs
- * POST /api/seo/upload/complete  → 完成上傳 + 建立 job
+ * POST /api/seo/upload/init      → GCS signed URL 初始化（前端直傳 GCS）
  * GET  /api/seo/process/:jobId   → SSE 進度推送 + 觸發處理
  * GET  /api/seo/jobs              → 歷史記錄
  * GET  /api/seo/jobs/:jobId       → 單筆結果
@@ -13,39 +11,30 @@
 
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
-import {
-  S3Client,
-  CreateMultipartUploadCommand,
-  UploadPartCommand,
-  CompleteMultipartUploadCommand,
-  AbortMultipartUploadCommand,
-} from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { Storage } from '@google-cloud/storage';
 import { createClient } from '@supabase/supabase-js';
-import { processVideoSeo, deleteR2Object } from './seo-video.js';
+import { processVideoSeo, deleteGcsObject } from './seo-video.js';
 import { nanoid } from 'nanoid';
 
 // ── Config ──────────────────────────────────────────────────
 
-const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID || 'b4dcf0aa309942f83f66289fb22cfe2f';
-const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID || '6aefc53c434ae7e17bc09902d744f568';
-const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY || '48b5829b321582ccd142d05228bd58fcad56e4fce65195c1e401db3566b7e71b';
-const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME || 'seo-videos';
+const GCS_BUCKET_NAME = 'singple-seo-videos';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
 // ── Clients ─────────────────────────────────────────────────
 
-const s3 = new S3Client({
-  region: 'auto',
-  endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-  credentials: {
-    accessKeyId: R2_ACCESS_KEY_ID,
-    secretAccessKey: R2_SECRET_ACCESS_KEY,
-  },
-  forcePathStyle: true,
-});
+// GCS: support env var (for Zeabur deploy) or local key file
+let storageOptions: ConstructorParameters<typeof Storage>[0] = {};
+if (process.env.GCS_KEY_JSON) {
+  const credentials = JSON.parse(Buffer.from(process.env.GCS_KEY_JSON, 'base64').toString());
+  storageOptions = { credentials };
+} else {
+  storageOptions = { keyFilename: './gcs-key.json' };
+}
+const gcsStorage = new Storage(storageOptions);
+const gcsBucket = gcsStorage.bucket(GCS_BUCKET_NAME);
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
@@ -95,11 +84,11 @@ export const seoRoutes = new Hono();
   }
 })();
 
-// ── Upload: Init multipart ──────────────────────────────────
+// ── Upload: Init (GCS signed URL) ──────────────────────────
 
 seoRoutes.post('/upload/init', async (c) => {
   try {
-    const { fileName, fileSize, contentType } = await c.req.json();
+    const { fileName, fileSize, description, videoType, duration, thumbnail } = await c.req.json();
 
     if (!fileName || !fileSize) {
       return c.json({ error: 'Missing fileName or fileSize' }, 400);
@@ -110,83 +99,17 @@ seoRoutes.post('/upload/init', async (c) => {
       return c.json({ error: '檔案大小超過 3GB 限制' }, 400);
     }
 
-    // Validate content type
-    const allowedTypes = ['video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/webm'];
-    if (contentType && !allowedTypes.includes(contentType)) {
-      return c.json({ error: '不支援的影片格式' }, 400);
-    }
+    const fileId = nanoid();
+    const key = `uploads/${fileId}.mp4`;
+    const gcsUri = `gs://${GCS_BUCKET_NAME}/${key}`;
 
-    const key = `uploads/${nanoid()}_${fileName}`;
-
-    const cmd = new CreateMultipartUploadCommand({
-      Bucket: R2_BUCKET_NAME,
-      Key: key,
-      ContentType: contentType || 'video/mp4',
+    // Generate GCS signed URL for direct PUT upload
+    const [uploadUrl] = await gcsBucket.file(key).getSignedUrl({
+      version: 'v4',
+      action: 'write',
+      expires: Date.now() + 60 * 60 * 1000, // 1 hour
+      contentType: 'video/mp4',
     });
-
-    const result = await s3.send(cmd);
-
-    return c.json({
-      uploadId: result.UploadId,
-      key,
-      chunkSize: 50 * 1024 * 1024, // 50MB recommended chunk size
-    });
-  } catch (err) {
-    console.error('Upload init error:', err);
-    return c.json({ error: 'Upload initialization failed' }, 500);
-  }
-});
-
-// ── Upload: Get presigned URLs for chunks ───────────────────
-
-seoRoutes.post('/upload/presign', async (c) => {
-  try {
-    const { uploadId, key, parts } = await c.req.json();
-
-    if (!uploadId || !key || !parts) {
-      return c.json({ error: 'Missing uploadId, key, or parts' }, 400);
-    }
-
-    const urls: string[] = [];
-
-    for (let i = 1; i <= parts; i++) {
-      const cmd = new UploadPartCommand({
-        Bucket: R2_BUCKET_NAME,
-        Key: key,
-        UploadId: uploadId,
-        PartNumber: i,
-      });
-      const url = await getSignedUrl(s3, cmd, { expiresIn: 3600 });
-      urls.push(url);
-    }
-
-    return c.json({ urls });
-  } catch (err) {
-    console.error('Presign error:', err);
-    return c.json({ error: 'Failed to generate presigned URLs' }, 500);
-  }
-});
-
-// ── Upload: Complete multipart + create job ─────────────────
-
-seoRoutes.post('/upload/complete', async (c) => {
-  try {
-    const { uploadId, key, parts, fileName, fileSize, duration, thumbnail, description, videoType } = await c.req.json();
-
-    // Complete R2 multipart upload
-    const cmd = new CompleteMultipartUploadCommand({
-      Bucket: R2_BUCKET_NAME,
-      Key: key,
-      UploadId: uploadId,
-      MultipartUpload: {
-        Parts: parts.map((p: { ETag: string; PartNumber: number }) => ({
-          ETag: p.ETag,
-          PartNumber: p.PartNumber,
-        })),
-      },
-    });
-
-    await s3.send(cmd);
 
     // Create seo_jobs record
     const { data: job, error } = await supabase.from('seo_jobs').insert({
@@ -194,7 +117,7 @@ seoRoutes.post('/upload/complete', async (c) => {
       progress: 0,
       stage: 'uploaded',
       stage_detail: '影片已上傳，等待處理',
-      file_key: key,
+      file_key: gcsUri,
       file_name: fileName,
       file_size: fileSize,
       description: description || '',
@@ -205,10 +128,10 @@ seoRoutes.post('/upload/complete', async (c) => {
 
     if (error) throw error;
 
-    return c.json({ jobId: job.id, status: 'pending' });
+    return c.json({ jobId: job.id, uploadUrl, key });
   } catch (err) {
-    console.error('Upload complete error:', err);
-    return c.json({ error: 'Failed to complete upload' }, 500);
+    console.error('Upload init error:', err);
+    return c.json({ error: 'Upload initialization failed' }, 500);
   }
 });
 
@@ -230,10 +153,7 @@ seoRoutes.get('/process/:jobId', async (c) => {
     };
 
     try {
-      // Start processing in background
       const resultPromise = processVideoSeo(jobId, sendProgress);
-
-      // No polling - sendProgress callback handles all updates directly
       const result = await resultPromise;
       completed = true;
 
@@ -322,7 +242,6 @@ seoRoutes.post('/jobs/:jobId/select', async (c) => {
 seoRoutes.post('/jobs/:jobId/retry', async (c) => {
   const jobId = c.req.param('jobId');
 
-  // Reset job status
   const { error } = await supabase.from('seo_jobs').update({
     status: 'pending',
     progress: 0,
@@ -339,12 +258,11 @@ seoRoutes.post('/jobs/:jobId/retry', async (c) => {
 
 seoRoutes.delete('/jobs/all', async (c) => {
   try {
-    // Get all jobs to clean up storage
     const { data: jobs } = await supabase.from('seo_jobs').select('id, file_key');
     if (jobs && jobs.length > 0) {
       for (const job of jobs) {
-        if (job.file_key) {
-          deleteR2Object(job.file_key).catch(() => {});
+        if (job.file_key?.startsWith('gs://')) {
+          deleteGcsObject(job.file_key).catch(() => {});
         }
       }
     }
@@ -362,10 +280,9 @@ seoRoutes.delete('/jobs/all', async (c) => {
 seoRoutes.delete('/jobs/:jobId', async (c) => {
   const jobId = c.req.param('jobId');
 
-  // Get file_key to clean up R2
   const { data: job } = await supabase.from('seo_jobs').select('file_key').eq('id', jobId).single();
-  if (job?.file_key) {
-    deleteR2Object(job.file_key).catch(() => {});
+  if (job?.file_key?.startsWith('gs://')) {
+    deleteGcsObject(job.file_key).catch(() => {});
   }
 
   const { error } = await supabase.from('seo_jobs').delete().eq('id', jobId);

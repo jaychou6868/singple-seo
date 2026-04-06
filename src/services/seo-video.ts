@@ -1,25 +1,19 @@
 /**
  * SEO Video Service — 影片 SEO 文案 + YouTube 標題生成
  *
- * 新流程：瀏覽器直傳 → /tmp → Gemini（跳過 R2）
- * 舊流程（向下相容）：R2 → 下載 → Gemini
+ * 流程：前端直傳 GCS → Gemini 直讀 gs:// URI（零下載）
  *
  * 生成: Gemini 3.1 Pro (thinkingLevel: high)
  * 審核: Gemini 3.1 Pro NLP 審核
  * 編號: YouTube Data API v3
  */
 
-import { S3Client, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { Storage } from '@google-cloud/storage';
 import { createClient } from '@supabase/supabase-js';
-import * as fs from 'node:fs';
-import { pipeline } from 'node:stream/promises';
 
 // ── Config ──────────────────────────────────────────────────
 
-const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID || 'b4dcf0aa309942f83f66289fb22cfe2f';
-const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID || '6aefc53c434ae7e17bc09902d744f568';
-const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY || '48b5829b321582ccd142d05228bd58fcad56e4fce65195c1e401db3566b7e71b';
-const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME || 'seo-videos';
+const GCS_BUCKET_NAME = 'singple-seo-videos';
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
@@ -29,19 +23,18 @@ const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
 const GEMINI_MODEL = 'gemini-3.1-pro-preview';
-const LARGE_FILE_THRESHOLD = 200 * 1024 * 1024; // 200MB — use disk instead of buffer
 
 // ── Clients ─────────────────────────────────────────────────
 
-const s3 = new S3Client({
-  region: 'auto',
-  endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-  credentials: {
-    accessKeyId: R2_ACCESS_KEY_ID,
-    secretAccessKey: R2_SECRET_ACCESS_KEY,
-  },
-  forcePathStyle: true,
-});
+let gcsStorageOptions: ConstructorParameters<typeof Storage>[0] = {};
+if (process.env.GCS_KEY_JSON) {
+  const credentials = JSON.parse(Buffer.from(process.env.GCS_KEY_JSON, 'base64').toString());
+  gcsStorageOptions = { credentials };
+} else {
+  gcsStorageOptions = { keyFilename: './gcs-key.json' };
+}
+const gcsStorage = new Storage(gcsStorageOptions);
+const gcsBucket = gcsStorage.bucket(GCS_BUCKET_NAME);
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
@@ -74,45 +67,13 @@ async function updateJobProgress(
   onProgress?.(progress, stage, detail);
 }
 
-// ── Retry helper ───────────────────────────────────────────
+// ── GCS helpers ────────────────────────────────────────────
 
-async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3, label = ''): Promise<T> {
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      return await fn();
-    } catch (err) {
-      console.error(`[SEO] ${label} attempt ${i + 1}/${maxRetries} failed:`, err instanceof Error ? err.message : err);
-      if (i === maxRetries - 1) throw err;
-      await new Promise(r => setTimeout(r, (i + 1) * 5000)); // 5s, 10s, 15s backoff
-    }
-  }
-  throw new Error('unreachable');
-}
-
-// ── R2 helpers ──────────────────────────────────────────────
-
-export async function getR2Buffer(key: string): Promise<Buffer> {
-  const command = new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key });
-  const response = await s3.send(command);
-  const stream = response.Body as NodeJS.ReadableStream;
-  const chunks: Buffer[] = [];
-  for await (const chunk of stream) {
-    chunks.push(Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks);
-}
-
-export async function getR2Stream(key: string): Promise<{ stream: NodeJS.ReadableStream; contentType: string }> {
-  const command = new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key });
-  const response = await s3.send(command);
-  return {
-    stream: response.Body as NodeJS.ReadableStream,
-    contentType: response.ContentType || 'video/mp4',
-  };
-}
-
-export async function deleteR2Object(key: string): Promise<void> {
-  await s3.send(new DeleteObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key }));
+/** Delete a GCS object by its gs:// URI */
+export async function deleteGcsObject(gcsUri: string): Promise<void> {
+  const path = gcsUri.replace(`gs://${GCS_BUCKET_NAME}/`, '');
+  await gcsBucket.file(path).delete();
+  console.log(`[SEO] GCS deleted: ${path}`);
 }
 
 // ── Gemini API ──────────────────────────────────────────────
@@ -134,7 +95,7 @@ async function callGemini(prompt: string, systemPrompt?: string): Promise<string
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 300000); // 5 min timeout (high thinking needs more time)
+  const timeout = setTimeout(() => controller.abort(), 300000);
 
   try {
     const res = await fetch(url, {
@@ -168,90 +129,78 @@ function parseJsonResponse(text: string): any {
   return null;
 }
 
-// ── Gemini Video Analysis (all videos) ─────────────────────
+// ── Gemini Video Analysis (GCS → register → analyze) ──────
 
 async function analyzeVideoWithGemini(
-  fileKey: string,
+  gcsUri: string,
   description: string,
   jobId: string,
   onProgress?: ProgressCallback,
 ): Promise<{ analysis: string; transcript: string }> {
-  await updateJobProgress(jobId, 10, 'preparing', '準備影片中...', onProgress);
+  await updateJobProgress(jobId, 10, 'preparing', '準備影片中（GCS 直讀）...', onProgress);
 
-  // Read video from local /tmp or fall back to R2 for legacy jobs
-  let videoBuffer: Buffer;
-  const isLocalFile = fileKey.startsWith('/tmp/');
+  // Register GCS file with Gemini Files API
+  await updateJobProgress(jobId, 12, 'uploading_gemini', '向 Gemini 註冊 GCS 影片...', onProgress);
 
-  if (isLocalFile) {
-    // New flow: file already on disk from upload endpoint
-    if (!fs.existsSync(fileKey)) {
-      throw new Error(`影片檔案不存在：${fileKey}`);
-    }
-    videoBuffer = fs.readFileSync(fileKey);
-    console.log(`[SEO] Local file read OK: ${fileKey} (${videoBuffer.length} bytes)`);
-  } else {
-    // Legacy flow: download from R2 (with retry)
-    const jobData = (await supabase.from('seo_jobs').select('file_size, video_type').eq('id', jobId).single()).data;
-    const fileSize = jobData?.file_size || 0;
-    if (fileSize > LARGE_FILE_THRESHOLD) {
-      const tmpDir = `/tmp/seo-${jobId}`;
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const videoPath = `${tmpDir}/video.mp4`;
-      try {
-        await withRetry(async () => {
-          const { stream: r2Stream } = await getR2Stream(fileKey);
-          await Promise.race([
-            pipeline(r2Stream, fs.createWriteStream(videoPath)),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('下載超時（30分鐘）')), 1800000)),
-          ]);
-        }, 3, 'R2 stream download');
-        videoBuffer = fs.readFileSync(videoPath);
-      } finally {
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-      }
-    } else {
-      videoBuffer = await withRetry(() => getR2Buffer(fileKey), 3, 'R2 buffer download');
-    }
-    console.log(`[SEO] R2 download OK: ${fileKey} (${videoBuffer.length} bytes)`);
-  }
-
-  await updateJobProgress(jobId, 15, 'uploading_gemini', '上傳影片到 Gemini...', onProgress);
-
-  // Upload to Gemini Files API
-  const geminiUploadUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${GEMINI_API_KEY}`;
-  let fileUri: string;
-  const uploadRes = await fetch(geminiUploadUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'video/mp4',
-      'X-Goog-Upload-Command': 'upload, finalize',
-      'X-Goog-Upload-Header-Content-Length': videoBuffer.length.toString(),
+  const registerRes = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/files?key=${GEMINI_API_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        file: {
+          display_name: `seo-${jobId}`,
+          uri: gcsUri,
+        },
+      }),
     },
-    body: new Uint8Array(videoBuffer),
-  });
+  );
 
-  const fileData = await uploadRes.json() as any;
-  console.log(`[SEO] Gemini upload:`, JSON.stringify(fileData).substring(0, 300));
-  fileUri = fileData?.file?.uri;
-  if (!fileUri) throw new Error(`Gemini upload failed: ${JSON.stringify(fileData).substring(0, 200)}`);
+  const registerData = await registerRes.json() as any;
+  console.log(`[SEO] Gemini register GCS:`, JSON.stringify(registerData).substring(0, 300));
+  const geminiFileName = registerData?.file?.name;
+  let fileUri = registerData?.file?.uri;
+  const fileState = registerData?.file?.state;
 
-  // Free disk space immediately after Gemini upload (for /tmp files)
-  if (isLocalFile) {
-    const tmpDir = fileKey.replace(/\/video\.mp4$/, '');
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-    console.log(`[SEO] Freed tmp after Gemini upload: ${tmpDir}`);
+  if (!geminiFileName && !fileUri) {
+    throw new Error(`Gemini GCS register failed: ${JSON.stringify(registerData).substring(0, 300)}`);
   }
 
-  // Wait for Gemini to process the uploaded file
-  await new Promise(r => setTimeout(r, 5000));
+  // Poll until file is ACTIVE
+  await updateJobProgress(jobId, 15, 'uploading_gemini', 'Gemini 處理影片中...', onProgress);
+  let state = fileState || 'PROCESSING';
+  let pollAttempts = 0;
+  const maxPollAttempts = 120; // 10 min max (5s intervals)
 
+  while (state === 'PROCESSING' && pollAttempts < maxPollAttempts) {
+    await new Promise(r => setTimeout(r, 5000));
+    pollAttempts++;
+
+    const pollRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/${geminiFileName}?key=${GEMINI_API_KEY}`,
+    );
+    const pollData = await pollRes.json() as any;
+    state = pollData?.state || 'PROCESSING';
+    fileUri = pollData?.uri || fileUri;
+
+    if (pollAttempts % 6 === 0) {
+      console.log(`[SEO] Gemini file state: ${state} (poll #${pollAttempts})`);
+    }
+  }
+
+  if (state !== 'ACTIVE') {
+    throw new Error(`Gemini file not ready after polling: state=${state}`);
+  }
+
+  console.log(`[SEO] Gemini file ACTIVE: ${fileUri}`);
+
+  // Analyze video
   const analysisUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
   const videoFilePart = { fileData: { mimeType: 'video/mp4', fileUri } };
 
-  // 只做內容分析（文字轉錄留到未來 YouTube 縮圖功能再加）
   await updateJobProgress(jobId, 20, 'analyzing', '分析影片中...', onProgress);
 
-  const analyzePromise = fetch(analysisUrl, {
+  const analysisData = await fetch(analysisUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -282,10 +231,7 @@ async function analyzeVideoWithGemini(
     }),
   }).then(r => r.json() as Promise<any>);
 
-  const analysisData = await analyzePromise;
   const transcript = '';
-
-  // 解析分析結果
   const analysisParts = analysisData?.candidates?.[0]?.content?.parts || [];
   let analysisText = '';
   for (let i = analysisParts.length - 1; i >= 0; i--) {
@@ -302,8 +248,6 @@ async function generateSeoCaption(
   description: string,
   videoAnalysis: string | null,
 ): Promise<Record<string, unknown> | null> {
-  // Read shared knowledge from Supabase
-  const { data: skeletons } = await supabase.from('seo_title_skeletons').select('*');
   const { data: examples } = await supabase.from('seo_viral_examples').select('*').limit(5);
   const { data: trackerData } = await supabase.from('seo_trackers').select('*').eq('id', 'style_tracker').single();
 
@@ -422,7 +366,6 @@ async function generateYouTubeTitles(
   caption: Record<string, unknown>,
   videoAnalysis: string | null,
 ): Promise<Record<string, unknown>[] | null> {
-  // Read skeletons from Supabase
   const { data: skeletons } = await supabase.from('seo_title_skeletons').select('*');
   const { data: trackerData } = await supabase.from('seo_trackers').select('*').eq('id', 'title_tracker').single();
   const { data: examples } = await supabase.from('seo_viral_examples').select('*').eq('type', 'title').limit(10);
@@ -432,7 +375,6 @@ async function generateYouTubeTitles(
   const recentAngles = tracker.recent_angles || [];
   const angles = ['痛點', '反差', '數字', '場景', '挑戰', '權威', '結果', '否定'];
 
-  // Select 5 different skeletons and angles
   const availableSkeletons = (skeletons || []).filter((s: any) => !recentSkeletons.slice(-5).includes(s.id));
   const availableAngles = angles.filter(a => !recentAngles.slice(-5).includes(a));
 
@@ -548,7 +490,6 @@ async function getNextEpisodeNumber(): Promise<number | null> {
     }
 
     if (maxNum > 0) {
-      // Always use YouTube actual number + 1, never increment locally
       console.log(`[SEO] YouTube latest: #${maxNum} → next: #${maxNum + 1}`);
       return maxNum + 1;
     }
@@ -565,7 +506,6 @@ async function updateTrackers(
   caption: Record<string, unknown>,
   titles: Record<string, unknown>[],
 ) {
-  // Update style tracker
   const { data: styleTracker } = await supabase
     .from('seo_trackers')
     .select('data')
@@ -582,7 +522,6 @@ async function updateTrackers(
     .from('seo_trackers')
     .upsert({ id: 'style_tracker', data: styleData, updated_at: new Date().toISOString() });
 
-  // Update title tracker
   const { data: titleTracker } = await supabase
     .from('seo_trackers')
     .select('data')
@@ -616,17 +555,18 @@ export async function processVideoSeo(
   jobId: string,
   onProgress?: ProgressCallback,
 ): Promise<SeoResult> {
-  // Read job
   const { data: job } = await supabase.from('seo_jobs').select('*').eq('id', jobId).single();
   if (!job) throw new Error(`Job ${jobId} not found`);
 
-  const fileKey = job.file_key;
-  const fileSize = job.file_size || 0;
+  const fileKey = job.file_key as string;
   const description = job.description || '';
   await updateJobProgress(jobId, 5, 'starting', '開始處理...', onProgress);
   await supabase.from('seo_jobs').update({ status: 'processing' }).eq('id', jobId);
 
-  // All videos → Gemini direct analysis (no FFmpeg needed)
+  if (!fileKey.startsWith('gs://')) {
+    throw new Error(`Unsupported file_key format (R2 no longer supported): ${fileKey}`);
+  }
+
   const result = await analyzeVideoWithGemini(fileKey, description, jobId, onProgress);
   const content = result.transcript;
   const videoAnalysis: string | null = result.analysis;
@@ -635,7 +575,7 @@ export async function processVideoSeo(
   await updateJobProgress(jobId, 45, 'generating_caption', '並行生成 SEO 文案 + YouTube 標題...', onProgress);
   const [captionRaw, titlesRaw] = await Promise.all([
     generateSeoCaption(content, description, videoAnalysis),
-    generateYouTubeTitles(content, {} as any, videoAnalysis), // no caption dependency for titles
+    generateYouTubeTitles(content, {} as any, videoAnalysis),
   ]);
   let caption = captionRaw;
   if (!caption) throw new Error('SEO caption generation failed');
@@ -686,16 +626,10 @@ export async function processVideoSeo(
     updated_at: new Date().toISOString(),
   }).eq('id', jobId);
 
-  // Clean up: /tmp immediately, R2 after 48 hours
-  if (fileKey.startsWith('/tmp/')) {
-    const tmpDir = fileKey.replace(/\/video\.mp4$/, '');
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-    console.log(`[SEO] Cleaned up tmp: ${tmpDir}`);
-  } else {
-    setTimeout(() => {
-      deleteR2Object(fileKey).catch(() => {});
-    }, 48 * 3600 * 1000);
-  }
+  // Clean up GCS file after processing
+  deleteGcsObject(fileKey).catch((err) => {
+    console.error(`[SEO] GCS cleanup failed: ${err}`);
+  });
 
   return { caption, titles, episodeNumber, transcript: content };
 }

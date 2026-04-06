@@ -617,18 +617,11 @@
 // ====================================================================
 // Constants & State
 // ====================================================================
-const CHUNK_SIZE = 50 * 1024 * 1024; // 50MB
-const MAX_CONCURRENT = 3;
 // Backend stage → HTML step-item data-step mapping
-// Backend sends: downloading, extracting_audio, uploading_gemini, transcribing, converting, analyzing, generating_caption, reviewing_caption, generating_titles, reviewing_titles, numbering, saving, done
-// HTML has: video_analysis, audio_transcription, content_understanding, keyword_research, seo_copy, title_generation, hashtag_generation, alt_text, nlp_review, final_assembly
 const STAGE_TO_STEP = {
     'starting': 'video_analysis',
-    'downloading': 'video_analysis',
-    'extracting_audio': 'audio_transcription',
+    'preparing': 'video_analysis',
     'uploading_gemini': 'video_analysis',
-    'transcribing': 'audio_transcription',
-    'converting': 'content_understanding',
     'analyzing': 'content_understanding',
     'generating_caption': 'seo_copy',
     'reviewing_caption': 'seo_copy',
@@ -648,12 +641,9 @@ const HTML_STEPS = [
 
 const STEP_LABELS = {
     starting: '開始處理',
-    downloading: '影片下載',
-    extracting_audio: '音軌提取',
-    uploading_gemini: 'Gemini 分析',
-    transcribing: '語音轉文字',
-    converting: '繁體轉換',
-    analyzing: '內容理解',
+    preparing: '準備影片',
+    uploading_gemini: 'Gemini 註冊影片',
+    analyzing: '影片分析',
     generating_caption: 'SEO 文案生成',
     reviewing_caption: 'NLP 文案審核',
     generating_titles: 'YouTube 標題生成',
@@ -891,19 +881,27 @@ async function startGeneration() {
     $uploadProgressWrap.classList.remove('hidden');
 
     try {
-        // Direct upload to server (no R2)
-        const formData = new FormData();
-        formData.append('file', selectedFile);
-        formData.append('fileName', selectedFile.name);
-        formData.append('fileSize', String(selectedFile.size));
-        formData.append('description', $videoDesc.value || '');
-        formData.append('videoType', $videoType.value || 'auto');
-        formData.append('duration', String(selectedFileDuration || 0));
-        formData.append('thumbnail', selectedFileThumbnail || '');
+        // Step 1: Get GCS signed URL + create job
+        const initRes = await fetch('/api/seo/upload/init', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                fileName: selectedFile.name,
+                fileSize: selectedFile.size,
+                description: $videoDesc.value,
+                videoType: $videoType.value,
+                duration: selectedFileDuration,
+                thumbnail: selectedFileThumbnail
+            })
+        });
+        if (!initRes.ok) throw new Error('初始化上傳失敗: ' + initRes.status);
+        const { jobId, uploadUrl } = await initRes.json();
 
-        const uploadResult = await new Promise((resolve, reject) => {
+        // Step 2: Upload directly to GCS via signed URL
+        await new Promise((resolve, reject) => {
             const xhr = new XMLHttpRequest();
-            xhr.open('POST', '/api/seo/upload');
+            xhr.open('PUT', uploadUrl);
+            xhr.setRequestHeader('Content-Type', 'video/mp4');
 
             xhr.upload.onprogress = (e) => {
                 if (e.lengthComputable) {
@@ -918,18 +916,17 @@ async function startGeneration() {
 
             xhr.onload = () => {
                 if (xhr.status >= 200 && xhr.status < 300) {
-                    resolve(JSON.parse(xhr.responseText));
+                    resolve();
                 } else {
-                    reject(new Error('上傳失敗: ' + xhr.status));
+                    reject(new Error('GCS 上傳失敗: ' + xhr.status));
                 }
             };
             xhr.onerror = () => reject(new Error('網路錯誤'));
-            xhr.send(formData);
+            xhr.send(selectedFile);
         });
 
-        currentJobId = uploadResult.jobId;
-
-        // Move to processing state
+        // Step 3: Start processing via SSE
+        currentJobId = jobId;
         $processingFileLabel.textContent = selectedFile.name;
         showState('processing');
         saveActiveJob(currentJobId);
