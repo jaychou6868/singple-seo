@@ -303,6 +303,27 @@ seoRoutes.get('/kb-status', async (c) => {
   });
 });
 
+// ── Debug: Test viral examples insert ──────────────────────
+
+seoRoutes.get('/kb-test-insert', async (c) => {
+  const testId = `test_${Date.now()}`;
+  const { data, error } = await supabase.from('seo_viral_examples').insert({
+    id: testId,
+    content: 'TEST — will be deleted',
+    type: 'test',
+    category: 'test',
+    angle: 'test',
+  }).select();
+
+  if (error) {
+    return c.json({ ok: false, error, hint: 'Table schema mismatch — check required columns' });
+  }
+
+  // Clean up test row
+  await supabase.from('seo_viral_examples').delete().eq('id', testId);
+  return c.json({ ok: true, inserted: data, message: 'Insert + delete succeeded' });
+});
+
 // ── Viral Learner: Manual trigger ──────────────────────────
 
 seoRoutes.post('/viral-learn', async (c) => {

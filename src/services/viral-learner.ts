@@ -81,7 +81,7 @@ const channelCache = new Map<string, { avgViews: number; subscriberCount: number
 
 // ── YouTube API helpers ─────────────────────────────────────
 
-async function searchYouTube(query: string, maxResults = 50): Promise<YouTubeVideo[]> {
+async function searchYouTube(query: string, maxResults = 15): Promise<YouTubeVideo[]> {
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
 
   const searchUrl = new URL('https://www.googleapis.com/youtube/v3/search');
@@ -127,7 +127,8 @@ async function getChannelStats(channelId: string): Promise<{ avgViews: number; s
     return channelCache.get(channelId)!;
   }
 
-  // Get channel subscriber count
+  // Single API call: get channel statistics (1 unit instead of 102)
+  // Use totalViewCount / videoCount as estimated average
   const channelUrl = new URL('https://www.googleapis.com/youtube/v3/channels');
   channelUrl.searchParams.set('part', 'statistics');
   channelUrl.searchParams.set('id', channelId);
@@ -135,43 +136,19 @@ async function getChannelStats(channelId: string): Promise<{ avgViews: number; s
 
   const channelRes = await fetch(channelUrl.toString());
   const channelData = await channelRes.json() as any;
-  const subscriberCount = parseInt(channelData.items?.[0]?.statistics?.subscriberCount || '0');
+  const stats = channelData.items?.[0]?.statistics;
 
-  // Get channel's last 10 videos
-  const videosUrl = new URL('https://www.googleapis.com/youtube/v3/search');
-  videosUrl.searchParams.set('part', 'snippet');
-  videosUrl.searchParams.set('channelId', channelId);
-  videosUrl.searchParams.set('order', 'date');
-  videosUrl.searchParams.set('type', 'video');
-  videosUrl.searchParams.set('maxResults', '10');
-  videosUrl.searchParams.set('key', YOUTUBE_API_KEY);
-
-  const videosRes = await fetch(videosUrl.toString());
-  const videosData = await videosRes.json() as any;
-
-  if (!videosData.items?.length) {
-    const result = { avgViews: 0, subscriberCount };
+  if (!stats) {
+    const result = { avgViews: 0, subscriberCount: 0 };
     channelCache.set(channelId, result);
     return result;
   }
 
-  const ids = videosData.items.map((item: any) => item.id.videoId).join(',');
-  const statsUrl = new URL('https://www.googleapis.com/youtube/v3/videos');
-  statsUrl.searchParams.set('part', 'statistics');
-  statsUrl.searchParams.set('id', ids);
-  statsUrl.searchParams.set('key', YOUTUBE_API_KEY);
+  const subscriberCount = parseInt(stats.subscriberCount || '0');
+  const totalViews = parseInt(stats.viewCount || '0');
+  const videoCount = parseInt(stats.videoCount || '0');
+  const avgViews = videoCount > 0 ? Math.round(totalViews / videoCount) : 0;
 
-  const statsRes = await fetch(statsUrl.toString());
-  const statsData = await statsRes.json() as any;
-
-  let totalViews = 0;
-  let count = 0;
-  for (const item of statsData.items || []) {
-    totalViews += parseInt(item.statistics.viewCount || '0');
-    count++;
-  }
-
-  const avgViews = count > 0 ? Math.round(totalViews / count) : 0;
   const result = { avgViews, subscriberCount };
   channelCache.set(channelId, result);
   return result;
@@ -385,12 +362,13 @@ async function updateKnowledgeBase(
 
     for (const entry of exampleEntries) {
       const { error: exErr } = await supabase.from('seo_viral_examples').insert({
+        id: `vx_${nanoid(8)}`,
         content: entry.content,
         type: entry.type,
         category: entry.category,
         angle: entry.angle,
       }).select();
-      if (exErr) console.error(`[Viral Learner] Error inserting viral example (${entry.type}):`, exErr);
+      if (exErr) console.error(`[Viral Learner] Error inserting viral example (${entry.type}):`, JSON.stringify(exErr));
     }
   }
 
@@ -489,7 +467,7 @@ export async function runViralLearner(): Promise<WeeklyReport> {
   for (const query of SEARCH_QUERIES) {
     try {
       console.log(`[Viral Learner] Searching: ${query}`);
-      const videos = await searchYouTube(query, 50);
+      const videos = await searchYouTube(query, 15);
       allVideos = allVideos.concat(videos);
 
       // Small delay to respect API rate limits
