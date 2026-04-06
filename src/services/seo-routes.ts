@@ -294,7 +294,7 @@ seoRoutes.delete('/jobs/:jobId', async (c) => {
 // ── Debug: Check knowledge base status ─────────────────────
 seoRoutes.get('/kb-status', async (c) => {
   const { data: skeletons } = await supabase.from('seo_title_skeletons').select('id, pattern, weight').order('weight', { ascending: false });
-  const { data: examples } = await supabase.from('seo_viral_examples').select('id, content, type, category, angle').order('created_at', { ascending: false }).limit(10);
+  const { data: examples } = await supabase.from('seo_viral_examples').select('id, content, type, category, angle, source, quality_score').order('learned_at', { ascending: false }).limit(10);
   const { data: trackers } = await supabase.from('seo_trackers').select('id, data, updated_at');
   return c.json({
     skeletons: { count: skeletons?.length || 0, top5: skeletons?.slice(0, 5) },
@@ -322,6 +322,31 @@ seoRoutes.get('/kb-test-insert', async (c) => {
     await supabase.from('seo_viral_examples').delete().eq('id', data[0].id);
   }
   return c.json({ ok: true, inserted: data, message: 'Insert + delete succeeded' });
+});
+
+// ── Debug: Cleanup test data ──────────────────────────────
+
+seoRoutes.delete('/kb-test-cleanup', async (c) => {
+  // Delete test examples (source = viral_learner from test)
+  const { data: exDeleted, error: exErr } = await supabase
+    .from('seo_viral_examples')
+    .delete()
+    .eq('source', 'viral_learner')
+    .select('id');
+
+  // Delete test skeletons (vl_ prefix)
+  const { data: skDeleted, error: skErr } = await supabase
+    .from('seo_title_skeletons')
+    .delete()
+    .like('id', 'vl_%')
+    .select('id');
+
+  return c.json({
+    ok: !exErr && !skErr,
+    deletedExamples: exDeleted?.length || 0,
+    deletedSkeletons: skDeleted?.length || 0,
+    errors: [exErr, skErr].filter(Boolean),
+  });
 });
 
 // ── Viral Learner: Test save pipeline (bypass YouTube) ────
