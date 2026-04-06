@@ -291,6 +291,18 @@ seoRoutes.delete('/jobs/:jobId', async (c) => {
   return c.json({ ok: true });
 });
 
+// ── Debug: Check knowledge base status ─────────────────────
+seoRoutes.get('/kb-status', async (c) => {
+  const { data: skeletons } = await supabase.from('seo_title_skeletons').select('id, pattern, weight').order('weight', { ascending: false });
+  const { data: examples } = await supabase.from('seo_viral_examples').select('id, content, type, category, angle').order('created_at', { ascending: false }).limit(10);
+  const { data: trackers } = await supabase.from('seo_trackers').select('id, data, updated_at');
+  return c.json({
+    skeletons: { count: skeletons?.length || 0, top5: skeletons?.slice(0, 5) },
+    examples: { count: examples?.length || 0, latest5: examples?.slice(0, 5) },
+    trackers: trackers
+  });
+});
+
 // ── Viral Learner: Manual trigger ──────────────────────────
 
 seoRoutes.post('/viral-learn', async (c) => {

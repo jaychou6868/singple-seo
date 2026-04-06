@@ -150,16 +150,8 @@
             <span class="font-label">信件撰寫</span>
         </a>
     </nav>
-    <!-- Viral Learner -->
-    <div class="mt-auto px-6 pb-3">
-        <button id="viralLearnBtn" onclick="triggerViralLearn()" class="w-full flex items-center justify-center gap-2 py-2.5 bg-[#E8725A] text-white rounded-xl text-sm font-bold hover:opacity-90 transition-all shadow-md shadow-[#E8725A]/20 active:scale-[0.98]">
-            <span class="material-symbols-outlined text-lg">model_training</span>
-            手動學習
-        </button>
-        <p id="viralLearnStatus" class="text-[10px] text-[#8B8685] text-center mt-1.5">上次學習：載入中...</p>
-    </div>
     <!-- Roadmap -->
-    <div class="px-6 pb-6">
+    <div class="mt-auto px-6 pb-6">
         <div class="bg-white/60 rounded-xl p-4 border border-[#f0e8e4]">
             <div class="flex items-center gap-2 mb-3">
                 <span class="material-symbols-outlined text-[#E8725A] text-lg">rocket_launch</span>
@@ -583,6 +575,26 @@
 </div>
 </div>
 </main>
+
+<!-- ============================================================ -->
+<!-- AI Learning Engine -->
+<!-- ============================================================ -->
+<section class="ml-64 px-8 py-6">
+  <div class="bg-white rounded-2xl p-6 shadow-sm border border-[#f5eeeb] flex items-center justify-between">
+    <div>
+      <h3 class="text-lg font-headline font-bold text-brand-brown flex items-center gap-2">
+        <span class="material-symbols-outlined">model_training</span>
+        AI 學習引擎
+      </h3>
+      <p class="text-sm text-text-sub mt-1">自動學習 YouTube 跨類目爆款標題模式</p>
+      <p class="text-xs text-text-sub mt-1" id="lastLearnTime">上次學習：尚未執行</p>
+    </div>
+    <button onclick="triggerViralLearn()" id="learnBtn" class="px-5 py-2.5 bg-brand-peach text-white rounded-xl font-bold text-sm hover:bg-[#d4654f] transition-all flex items-center gap-2">
+      <span class="material-symbols-outlined text-lg">rocket_launch</span>
+      手動學習
+    </button>
+  </div>
+</section>
 
 <!-- ============================================================ -->
 <!-- History Section (always visible at bottom) -->
@@ -1328,30 +1340,32 @@ function exportResults() {
 // Viral Learner (manual trigger)
 // ====================================================================
 async function triggerViralLearn() {
-    const btn = document.getElementById('viralLearnBtn');
-    const statusEl = document.getElementById('viralLearnStatus');
+    const btn = document.getElementById('learnBtn');
+    const statusEl = document.getElementById('lastLearnTime');
     btn.disabled = true;
     btn.innerHTML = '<span class="material-symbols-outlined text-lg animate-spin">sync</span> 學習中...';
     try {
         const res = await fetch(SEO_BASE + '/api/seo/viral-learn', { method: 'POST' });
         if (!res.ok) throw new Error('學習失敗: ' + res.status);
         const data = await res.json();
-        const now = new Date().toISOString().slice(0, 10);
-        localStorage.setItem('seo_viral_learn_date', now);
+        const now = new Date().toLocaleString('zh-TW', { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
+        localStorage.setItem('lastViralLearn', now);
         statusEl.textContent = '上次學習：' + now;
-        showToast(data.message || '學習完成');
+        const r = data.result || {};
+        const msg = `學習完成！分析 ${r.videosAnalyzed || 0} 支影片，新增 ${r.newPatterns || 0} 個模式`;
+        showToast(msg);
     } catch (err) {
         console.error('Viral learn error:', err);
         showToast(err.message || '學習失敗', true);
     } finally {
         btn.disabled = false;
-        btn.innerHTML = '<span class="material-symbols-outlined text-lg">model_training</span> 手動學習';
+        btn.innerHTML = '<span class="material-symbols-outlined text-lg">rocket_launch</span> 手動學習';
     }
 }
 
 function loadViralLearnStatus() {
-    const saved = localStorage.getItem('seo_viral_learn_date');
-    const statusEl = document.getElementById('viralLearnStatus');
+    const saved = localStorage.getItem('lastViralLearn');
+    const statusEl = document.getElementById('lastLearnTime');
     if (saved) {
         statusEl.textContent = '上次學習：' + saved;
     } else {
