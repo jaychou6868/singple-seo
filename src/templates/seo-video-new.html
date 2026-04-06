@@ -1210,7 +1210,7 @@ async function loadHistory() {
                         ${escapeHtml(statusText)}
                     </div>
                     ${videoType ? '<div class="absolute top-2 right-2 px-2 py-0.5 bg-white/80 text-text-sub text-[10px] font-bold rounded">' + videoType + '</div>' : ''}
-                    <button onclick="event.stopPropagation(); deleteJob('${jobId}')" class="absolute bottom-2 right-2 w-7 h-7 bg-black/40 hover:bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all" title="刪除">
+                    <button onclick="event.stopPropagation(); deleteJob('${jobId}')" class="absolute bottom-2 right-2 w-7 h-7 bg-black/50 hover:bg-red-500 text-white rounded-full flex items-center justify-center transition-all" title="刪除">
                         <span class="material-symbols-outlined text-[14px]">delete</span>
                     </button>
                 </div>

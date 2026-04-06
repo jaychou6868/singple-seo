@@ -80,17 +80,13 @@ seoRoutes.post('/upload/init', async (c) => {
     const { fileName, fileSize, description, videoType, duration, thumbnail } = await c.req.json();
     if (!fileName) return c.json({ error: 'Missing fileName' }, 400);
 
-    const jobId = nanoid();
-    const tmpDir = `/tmp/seo-${jobId}`;
-    fs.mkdirSync(tmpDir, { recursive: true });
-
+    // Let Supabase auto-generate UUID
     const { data: job, error } = await supabase.from('seo_jobs').insert({
-      id: jobId,
       status: 'pending',
       progress: 0,
       stage: 'waiting_upload',
       stage_detail: '等待影片上傳',
-      file_key: `${tmpDir}/video.mp4`,
+      file_key: '/tmp/placeholder',
       file_name: fileName,
       file_size: fileSize || 0,
       description: description || '',
@@ -99,12 +95,16 @@ seoRoutes.post('/upload/init', async (c) => {
       source: 'web',
     }).select().single();
 
-    if (error) {
-      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-      throw error;
-    }
+    if (error) throw error;
 
-    return c.json({ jobId: job.id });
+    // Create tmp dir and update file_key with actual path
+    const jobId = job.id;
+    const tmpDir = `/tmp/seo-${jobId}`;
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const videoPath = `${tmpDir}/video.mp4`;
+    await supabase.from('seo_jobs').update({ file_key: videoPath }).eq('id', jobId);
+
+    return c.json({ jobId });
   } catch (err) {
     console.error('Upload init error:', err);
     return c.json({ error: 'Failed to create job' }, 500);
