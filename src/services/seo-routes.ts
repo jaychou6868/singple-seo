@@ -306,9 +306,7 @@ seoRoutes.get('/kb-status', async (c) => {
 // ── Debug: Test viral examples insert ──────────────────────
 
 seoRoutes.get('/kb-test-insert', async (c) => {
-  const testId = `test_${Date.now()}`;
   const { data, error } = await supabase.from('seo_viral_examples').insert({
-    id: testId,
     content: 'TEST — will be deleted',
     type: 'test',
     category: 'test',
@@ -320,7 +318,9 @@ seoRoutes.get('/kb-test-insert', async (c) => {
   }
 
   // Clean up test row
-  await supabase.from('seo_viral_examples').delete().eq('id', testId);
+  if (data?.[0]?.id) {
+    await supabase.from('seo_viral_examples').delete().eq('id', data[0].id);
+  }
   return c.json({ ok: true, inserted: data, message: 'Insert + delete succeeded' });
 });
 

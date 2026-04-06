@@ -361,14 +361,17 @@ async function updateKnowledgeBase(
     ];
 
     for (const entry of exampleEntries) {
-      const { error: exErr } = await supabase.from('seo_viral_examples').insert({
-        id: `vx_${nanoid(8)}`,
+      const { data: exData, error: exErr } = await supabase.from('seo_viral_examples').insert({
         content: entry.content,
         type: entry.type,
         category: entry.category,
         angle: entry.angle,
       }).select();
-      if (exErr) console.error(`[Viral Learner] Error inserting viral example (${entry.type}):`, JSON.stringify(exErr));
+      if (exErr) {
+        console.error(`[Viral Learner] Error inserting example (${entry.type}):`, JSON.stringify(exErr));
+      } else {
+        console.log(`[Viral Learner] ✓ Inserted example: ${entry.type} (id: ${exData?.[0]?.id})`);
+      }
     }
   }
 
