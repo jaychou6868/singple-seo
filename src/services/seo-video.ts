@@ -74,6 +74,21 @@ async function updateJobProgress(
   onProgress?.(progress, stage, detail);
 }
 
+// ── Retry helper ───────────────────────────────────────────
+
+async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3, label = ''): Promise<T> {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      console.error(`[SEO] ${label} attempt ${i + 1}/${maxRetries} failed:`, err instanceof Error ? err.message : err);
+      if (i === maxRetries - 1) throw err;
+      await new Promise(r => setTimeout(r, (i + 1) * 5000)); // 5s, 10s, 15s backoff
+    }
+  }
+  throw new Error('unreachable');
+}
+
 // ── R2 helpers ──────────────────────────────────────────────
 
 export async function getR2Buffer(key: string): Promise<Buffer> {
@@ -175,7 +190,7 @@ async function analyzeVideoWithGemini(
     videoBuffer = fs.readFileSync(fileKey);
     console.log(`[SEO] Local file read OK: ${fileKey} (${videoBuffer.length} bytes)`);
   } else {
-    // Legacy flow: download from R2
+    // Legacy flow: download from R2 (with retry)
     const jobData = (await supabase.from('seo_jobs').select('file_size, video_type').eq('id', jobId).single()).data;
     const fileSize = jobData?.file_size || 0;
     if (fileSize > LARGE_FILE_THRESHOLD) {
@@ -183,17 +198,19 @@ async function analyzeVideoWithGemini(
       fs.mkdirSync(tmpDir, { recursive: true });
       const videoPath = `${tmpDir}/video.mp4`;
       try {
-        const { stream: r2Stream } = await getR2Stream(fileKey);
-        await Promise.race([
-          pipeline(r2Stream, fs.createWriteStream(videoPath)),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('下載超時（30分鐘）')), 1800000)),
-        ]);
+        await withRetry(async () => {
+          const { stream: r2Stream } = await getR2Stream(fileKey);
+          await Promise.race([
+            pipeline(r2Stream, fs.createWriteStream(videoPath)),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('下載超時（30分鐘）')), 1800000)),
+          ]);
+        }, 3, 'R2 stream download');
         videoBuffer = fs.readFileSync(videoPath);
       } finally {
         try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
       }
     } else {
-      videoBuffer = await getR2Buffer(fileKey);
+      videoBuffer = await withRetry(() => getR2Buffer(fileKey), 3, 'R2 buffer download');
     }
     console.log(`[SEO] R2 download OK: ${fileKey} (${videoBuffer.length} bytes)`);
   }
