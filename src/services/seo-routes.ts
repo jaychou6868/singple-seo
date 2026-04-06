@@ -1,50 +1,28 @@
 /**
  * SEO Video API Routes — Hono 路由
  *
- * POST /api/seo/upload/init      → R2 multipart upload 初始化
- * POST /api/seo/upload/presign   → 取得 chunk presigned URLs
- * POST /api/seo/upload/complete  → 完成上傳 + 建立 job
- * GET  /api/seo/process/:jobId   → SSE 進度推送 + 觸發處理
- * GET  /api/seo/jobs             → 歷史記錄
- * GET  /api/seo/jobs/:jobId      → 單筆結果
+ * POST /api/seo/upload            → 直接上傳影片（multipart form data）
+ * GET  /api/seo/process/:jobId    → SSE 進度推送 + 觸發處理
+ * GET  /api/seo/jobs              → 歷史記錄
+ * GET  /api/seo/jobs/:jobId       → 單筆結果
  * POST /api/seo/jobs/:jobId/select → 選標題
  */
 
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
-import {
-  S3Client,
-  CreateMultipartUploadCommand,
-  UploadPartCommand,
-  CompleteMultipartUploadCommand,
-  AbortMultipartUploadCommand,
-} from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createClient } from '@supabase/supabase-js';
 import { processVideoSeo, deleteR2Object } from './seo-video.js';
 import { nanoid } from 'nanoid';
+import * as fs from 'node:fs';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 // ── Config ──────────────────────────────────────────────────
-
-const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID || 'b4dcf0aa309942f83f66289fb22cfe2f';
-const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID || '';
-const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY || '';
-const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME || 'seo-videos';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
 // ── Clients ─────────────────────────────────────────────────
-
-const s3 = new S3Client({
-  region: 'auto',
-  endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-  credentials: {
-    accessKeyId: R2_ACCESS_KEY_ID,
-    secretAccessKey: R2_SECRET_ACCESS_KEY,
-  },
-  forcePathStyle: true,
-});
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
@@ -94,120 +72,68 @@ export const seoRoutes = new Hono();
   }
 })();
 
-// ── Upload: Init multipart ──────────────────────────────────
+// ── Upload: Direct file upload (skip R2) ────────────────────
 
-seoRoutes.post('/upload/init', async (c) => {
+seoRoutes.post('/upload', async (c) => {
   try {
-    const { fileName, fileSize, contentType } = await c.req.json();
+    const body = await c.req.parseBody();
 
-    if (!fileName || !fileSize) {
-      return c.json({ error: 'Missing fileName or fileSize' }, 400);
+    const file = body['file'];
+    if (!file || !(file instanceof File)) {
+      return c.json({ error: 'Missing file' }, 400);
     }
 
-    // Validate file size (3GB max)
-    if (fileSize > 3 * 1024 * 1024 * 1024) {
-      return c.json({ error: '檔案大小超過 3GB 限制' }, 400);
+    const fileName = (body['fileName'] as string) || file.name || 'video.mp4';
+    const description = (body['description'] as string) || '';
+    const videoType = (body['videoType'] as string) || 'auto';
+    const duration = parseFloat((body['duration'] as string) || '0');
+    const thumbnail = (body['thumbnail'] as string) || '';
+
+    // Validate file size (1GB max for direct upload)
+    if (file.size > 1 * 1024 * 1024 * 1024) {
+      return c.json({ error: '檔案大小超過 1GB 限制' }, 400);
     }
 
-    // Validate content type
-    const allowedTypes = ['video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/webm'];
-    if (contentType && !allowedTypes.includes(contentType)) {
-      return c.json({ error: '不支援的影片格式' }, 400);
-    }
+    // Generate job ID and save to /tmp
+    const jobId = nanoid();
+    const tmpDir = `/tmp/seo-${jobId}`;
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const videoPath = `${tmpDir}/video.mp4`;
 
-    const key = `uploads/${nanoid()}_${fileName}`;
+    // Stream file to disk (avoid loading entire file into memory)
+    const arrayBuf = await file.arrayBuffer();
+    const nodeStream = Readable.from(Buffer.from(arrayBuf));
+    await pipeline(nodeStream, fs.createWriteStream(videoPath));
 
-    const cmd = new CreateMultipartUploadCommand({
-      Bucket: R2_BUCKET_NAME,
-      Key: key,
-      ContentType: contentType || 'video/mp4',
-    });
+    const fileSize = fs.statSync(videoPath).size;
+    console.log(`[SEO] Upload saved: ${videoPath} (${fileSize} bytes)`);
 
-    const result = await s3.send(cmd);
-
-    return c.json({
-      uploadId: result.UploadId,
-      key,
-      chunkSize: 50 * 1024 * 1024, // 50MB recommended chunk size
-    });
-  } catch (err) {
-    console.error('Upload init error:', err);
-    return c.json({ error: 'Upload initialization failed' }, 500);
-  }
-});
-
-// ── Upload: Get presigned URLs for chunks ───────────────────
-
-seoRoutes.post('/upload/presign', async (c) => {
-  try {
-    const { uploadId, key, parts } = await c.req.json();
-
-    if (!uploadId || !key || !parts) {
-      return c.json({ error: 'Missing uploadId, key, or parts' }, 400);
-    }
-
-    const urls: string[] = [];
-
-    for (let i = 1; i <= parts; i++) {
-      const cmd = new UploadPartCommand({
-        Bucket: R2_BUCKET_NAME,
-        Key: key,
-        UploadId: uploadId,
-        PartNumber: i,
-      });
-      const url = await getSignedUrl(s3, cmd, { expiresIn: 3600 });
-      urls.push(url);
-    }
-
-    return c.json({ urls });
-  } catch (err) {
-    console.error('Presign error:', err);
-    return c.json({ error: 'Failed to generate presigned URLs' }, 500);
-  }
-});
-
-// ── Upload: Complete multipart + create job ─────────────────
-
-seoRoutes.post('/upload/complete', async (c) => {
-  try {
-    const { uploadId, key, parts, fileName, fileSize, duration, thumbnail, description, videoType } = await c.req.json();
-
-    // Complete R2 multipart upload
-    const cmd = new CompleteMultipartUploadCommand({
-      Bucket: R2_BUCKET_NAME,
-      Key: key,
-      UploadId: uploadId,
-      MultipartUpload: {
-        Parts: parts.map((p: { ETag: string; PartNumber: number }) => ({
-          ETag: p.ETag,
-          PartNumber: p.PartNumber,
-        })),
-      },
-    });
-
-    await s3.send(cmd);
-
-    // Create seo_jobs record
+    // Create seo_jobs record — file_key stores the /tmp path
     const { data: job, error } = await supabase.from('seo_jobs').insert({
+      id: jobId,
       status: 'pending',
       progress: 0,
       stage: 'uploaded',
       stage_detail: '影片已上傳，等待處理',
-      file_key: key,
+      file_key: videoPath,
       file_name: fileName,
       file_size: fileSize,
-      description: description || '',
+      description,
       video_type: (duration && duration > 60) ? 'long' : (videoType || 'auto'),
       caption: thumbnail ? { thumbnail } : null,
       source: 'web',
     }).select().single();
 
-    if (error) throw error;
+    if (error) {
+      // Clean up tmp on DB error
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      throw error;
+    }
 
-    return c.json({ jobId: job.id, status: 'pending' });
+    return c.json({ jobId: job!.id, status: 'pending' });
   } catch (err) {
-    console.error('Upload complete error:', err);
-    return c.json({ error: 'Failed to complete upload' }, 500);
+    console.error('Upload error:', err);
+    return c.json({ error: 'Upload failed' }, 500);
   }
 });
 
@@ -339,10 +265,17 @@ seoRoutes.post('/jobs/:jobId/retry', async (c) => {
 seoRoutes.delete('/jobs/:jobId', async (c) => {
   const jobId = c.req.param('jobId');
 
-  // Get file_key to clean up R2
+  // Get file_key to clean up storage
   const { data: job } = await supabase.from('seo_jobs').select('file_key').eq('id', jobId).single();
   if (job?.file_key) {
-    deleteR2Object(job.file_key).catch(() => {});
+    if (job.file_key.startsWith('/tmp/')) {
+      // New flow: local /tmp file
+      const tmpDir = job.file_key.replace(/\/video\.mp4$/, '');
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    } else {
+      // Legacy: R2 object
+      deleteR2Object(job.file_key).catch(() => {});
+    }
   }
 
   const { error } = await supabase.from('seo_jobs').delete().eq('id', jobId);

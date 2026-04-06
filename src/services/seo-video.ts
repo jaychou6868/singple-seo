@@ -1,9 +1,8 @@
 /**
- * SEO Video Service — 全雲端影片 SEO 文案 + YouTube 標題生成
+ * SEO Video Service — 影片 SEO 文案 + YouTube 標題生成
  *
- * 所有影片統一用 Gemini Files API 直接分析（不需要 FFmpeg）
- * 短影片 (≤200MB): buffer → Gemini
- * 長影片 (>200MB): 串流到磁碟 → 讀取上傳 Gemini
+ * 新流程：瀏覽器直傳 → /tmp → Gemini（跳過 R2）
+ * 舊流程（向下相容）：R2 → 下載 → Gemini
  *
  * 生成: Gemini 3.1 Pro (thinkingLevel: high)
  * 審核: Gemini 3.1 Pro NLP 審核
@@ -162,32 +161,42 @@ async function analyzeVideoWithGemini(
   jobId: string,
   onProgress?: ProgressCallback,
 ): Promise<{ analysis: string; transcript: string }> {
-  await updateJobProgress(jobId, 10, 'downloading', '下載影片中...', onProgress);
+  await updateJobProgress(jobId, 10, 'preparing', '準備影片中...', onProgress);
 
-  // Download from R2
-  const jobData = (await supabase.from('seo_jobs').select('file_size, video_type').eq('id', jobId).single()).data;
-  const fileSize = jobData?.file_size || 0;
-  const job = (jobData || {}) as Record<string, any>;
+  // Read video from local /tmp or fall back to R2 for legacy jobs
   let videoBuffer: Buffer;
-  if (fileSize > LARGE_FILE_THRESHOLD) {
-    // Large file: stream to disk to avoid OOM
-    const tmpDir = `/tmp/seo-${jobId}`;
-    fs.mkdirSync(tmpDir, { recursive: true });
-    const videoPath = `${tmpDir}/video.mp4`;
-    try {
-      const { stream: r2Stream } = await getR2Stream(fileKey);
-      await Promise.race([
-        pipeline(r2Stream, fs.createWriteStream(videoPath)),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('下載超時（30分鐘）')), 1800000)),
-      ]);
-      videoBuffer = fs.readFileSync(videoPath);
-    } finally {
-      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  const isLocalFile = fileKey.startsWith('/tmp/');
+
+  if (isLocalFile) {
+    // New flow: file already on disk from upload endpoint
+    if (!fs.existsSync(fileKey)) {
+      throw new Error(`影片檔案不存在：${fileKey}`);
     }
+    videoBuffer = fs.readFileSync(fileKey);
+    console.log(`[SEO] Local file read OK: ${fileKey} (${videoBuffer.length} bytes)`);
   } else {
-    videoBuffer = await getR2Buffer(fileKey);
+    // Legacy flow: download from R2
+    const jobData = (await supabase.from('seo_jobs').select('file_size, video_type').eq('id', jobId).single()).data;
+    const fileSize = jobData?.file_size || 0;
+    if (fileSize > LARGE_FILE_THRESHOLD) {
+      const tmpDir = `/tmp/seo-${jobId}`;
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const videoPath = `${tmpDir}/video.mp4`;
+      try {
+        const { stream: r2Stream } = await getR2Stream(fileKey);
+        await Promise.race([
+          pipeline(r2Stream, fs.createWriteStream(videoPath)),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('下載超時（30分鐘）')), 1800000)),
+        ]);
+        videoBuffer = fs.readFileSync(videoPath);
+      } finally {
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      }
+    } else {
+      videoBuffer = await getR2Buffer(fileKey);
+    }
+    console.log(`[SEO] R2 download OK: ${fileKey} (${videoBuffer.length} bytes)`);
   }
-  console.log(`[SEO] R2 download OK: ${fileKey} (${videoBuffer.length} bytes)`);
 
   await updateJobProgress(jobId, 15, 'uploading_gemini', '上傳影片到 Gemini...', onProgress);
 
@@ -208,6 +217,13 @@ async function analyzeVideoWithGemini(
   console.log(`[SEO] Gemini upload:`, JSON.stringify(fileData).substring(0, 300));
   fileUri = fileData?.file?.uri;
   if (!fileUri) throw new Error(`Gemini upload failed: ${JSON.stringify(fileData).substring(0, 200)}`);
+
+  // Free disk space immediately after Gemini upload (for /tmp files)
+  if (isLocalFile) {
+    const tmpDir = fileKey.replace(/\/video\.mp4$/, '');
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    console.log(`[SEO] Freed tmp after Gemini upload: ${tmpDir}`);
+  }
 
   // Wait for Gemini to process the uploaded file
   await new Promise(r => setTimeout(r, 5000));
@@ -653,10 +669,16 @@ export async function processVideoSeo(
     updated_at: new Date().toISOString(),
   }).eq('id', jobId);
 
-  // Schedule R2 cleanup (48 hours)
-  setTimeout(() => {
-    deleteR2Object(fileKey).catch(() => {});
-  }, 48 * 3600 * 1000);
+  // Clean up: /tmp immediately, R2 after 48 hours
+  if (fileKey.startsWith('/tmp/')) {
+    const tmpDir = fileKey.replace(/\/video\.mp4$/, '');
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    console.log(`[SEO] Cleaned up tmp: ${tmpDir}`);
+  } else {
+    setTimeout(() => {
+      deleteR2Object(fileKey).catch(() => {});
+    }, 48 * 3600 * 1000);
+  }
 
   return { caption, titles, episodeNumber, transcript: content };
 }
