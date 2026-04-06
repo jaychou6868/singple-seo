@@ -9,6 +9,7 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
+import { nanoid } from 'nanoid';
 
 // ── Config ──────────────────────────────────────────────────
 
@@ -55,12 +56,14 @@ interface OverperformerVideo extends YouTubeVideo {
 }
 
 interface GeminiAnalysis {
-  skeleton: string;
-  trigger: string;
-  hook_technique: string;
-  emotion: string;
-  singing_example: string;
-  ig_caption_example: string;
+  title_skeleton: string;
+  ig_hook: string;
+  ig_cta: string;
+  rhetoric_technique: string;
+  emotional_trigger: string;
+  content_framework: string;
+  singing_title: string;
+  singing_caption: string;
 }
 
 interface WeeklyReport {
@@ -225,20 +228,25 @@ async function analyzeWithGemini(
     .map((t, i) => `${i + 1}. 「${t.title}」(觀看: ${t.views}, 超額: ${t.ratio}倍)`)
     .join('\n');
 
-  const prompt = `你是一位資深的 YouTube SEO 和文案分析專家。分析以下爆款影片標題，提取可複用的模式。
+  const prompt = `你是一位資深的 YouTube SEO 和社群媒體文案分析專家。
 
-這些標題都是「超額表現」的影片（觀看數遠超頻道平均），代表標題本身有吸引力。
+分析以下超額表現的影片標題（觀看數遠超頻道平均），提取「可直接複用」的模式和話術。
 
 標題列表：
 ${titlesText}
 
-對每個標題，提取：
-1. skeleton: 骨架結構（用 {變數} 表示可替換部分，例：「{痛點行為}？繼續這樣{後果}，{嚴重結果}」）
-2. trigger: 心理觸發器（恐懼/好奇/挑戰/反差/權威/數字/場景/否定）
-3. hook_technique: Hook 技巧（封閉性操作/損失框架/雙重束縛/讀心術/未來模擬）
-4. emotion: 情感基調（焦慮→希望/好奇→滿足/挑戰→成就/...）
-5. singing_example: 轉化為唱歌教學的範例標題
-6. ig_caption_example: 轉化為 IG Caption Hook 的範例
+對每個標題，提取以下 6 類可複用的模式：
+
+1. title_skeleton: 標題骨架結構（用 {變數} 表示可替換部分）
+2. ig_hook: 轉化為 IG 文案的開頭 Hook（20字內，繁體中文）
+3. ig_cta: 轉化為 IG 文案的 CTA 呼籲（一句話）
+4. rhetoric_technique: 使用的話術技巧（封閉性操作/損失框架/雙重束縛/讀心術/未來模擬/反差對比/數字錨定）
+5. emotional_trigger: 情感觸發策略（恐懼→希望/好奇→滿足/焦慮→行動/挑戰→成就）
+6. content_framework: 內容框架（問題→解法/迷思→真相/故事→教訓/挑戰→結果）
+
+另外為每個標題生成：
+7. singing_title: 轉化為唱歌教學的標題範例
+8. singing_caption: 轉化為唱歌教學的 IG 文案範例（含 Hook + 價值 + CTA，60字內）
 
 輸出 JSON 陣列。`;
 
@@ -304,48 +312,86 @@ async function updateKnowledgeBase(
     const video = overperformers[i];
     if (!analysis || !video) continue;
 
-    // Check if skeleton already exists
-    const { data: existing } = await supabase
+    // ── Update seo_title_skeletons (columns: id, pattern, example, weight) ──
+
+    const { data: existing, error: fetchErr } = await supabase
       .from('seo_title_skeletons')
       .select('*')
-      .eq('pattern', analysis.skeleton)
+      .eq('pattern', analysis.title_skeleton)
       .single();
+
+    if (fetchErr && fetchErr.code !== 'PGRST116') {
+      // PGRST116 = no rows found, anything else is a real error
+      console.error('[Viral Learner] Error fetching skeleton:', fetchErr);
+    }
 
     if (existing) {
       // Skeleton exists — increase weight (market validation)
       const currentWeight = existing.weight ?? 1.0;
-      await supabase
+      const { error: updateErr } = await supabase
         .from('seo_title_skeletons')
-        .update({ weight: Math.min(currentWeight + 0.1, 3.0), updated_at: new Date().toISOString() })
-        .eq('id', existing.id);
-      updatedSkeletons++;
+        .update({ weight: Math.min(currentWeight + 0.1, 3.0) })
+        .eq('id', existing.id)
+        .select();
+      if (updateErr) console.error('[Viral Learner] Error updating skeleton:', updateErr);
+      else updatedSkeletons++;
     } else {
       // New skeleton — insert
-      await supabase.from('seo_title_skeletons').insert({
-        pattern: analysis.skeleton,
-        example: analysis.singing_example,
+      const { error: insertErr } = await supabase.from('seo_title_skeletons').insert({
+        id: `vl_${nanoid(6)}`,
+        pattern: analysis.title_skeleton,
+        example: analysis.singing_title,
         weight: 1.0,
-        trigger: analysis.trigger,
-        hook_technique: analysis.hook_technique,
-        source: 'viral_learner',
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      });
-      newPatterns++;
+      }).select();
+      if (insertErr) console.error('[Viral Learner] Error inserting skeleton:', insertErr);
+      else newPatterns++;
     }
 
-    // Add to viral examples
-    await supabase.from('seo_viral_examples').insert({
-      content: video.title,
-      type: 'learned',
-      category: analysis.trigger,
-      angle: analysis.emotion,
-      source: 'viral_learner',
-      overperformance_ratio: video.overperformanceRatio,
-      singing_example: analysis.singing_example,
-      ig_caption_example: analysis.ig_caption_example,
-      created_at: new Date().toISOString(),
-    });
+    // ── Insert diverse entries into seo_viral_examples ──
+    // Table columns: id, content, type, category, angle
+
+    const exampleEntries: { content: string; type: string; category: string; angle: string }[] = [
+      {
+        content: analysis.title_skeleton,
+        type: 'title',
+        category: analysis.rhetoric_technique,
+        angle: analysis.emotional_trigger,
+      },
+      {
+        content: analysis.ig_hook,
+        type: 'ig_hook',
+        category: analysis.rhetoric_technique,
+        angle: analysis.emotional_trigger,
+      },
+      {
+        content: analysis.ig_cta,
+        type: 'ig_cta',
+        category: analysis.content_framework,
+        angle: analysis.emotional_trigger,
+      },
+      {
+        content: analysis.rhetoric_technique,
+        type: 'rhetoric',
+        category: analysis.content_framework,
+        angle: analysis.emotional_trigger,
+      },
+      {
+        content: `${analysis.singing_title}\n${analysis.singing_caption}`,
+        type: 'caption',
+        category: analysis.rhetoric_technique,
+        angle: analysis.emotional_trigger,
+      },
+    ];
+
+    for (const entry of exampleEntries) {
+      const { error: exErr } = await supabase.from('seo_viral_examples').insert({
+        content: entry.content,
+        type: entry.type,
+        category: entry.category,
+        angle: entry.angle,
+      }).select();
+      if (exErr) console.error(`[Viral Learner] Error inserting viral example (${entry.type}):`, exErr);
+    }
   }
 
   return { newPatterns, updatedSkeletons };
@@ -356,26 +402,32 @@ async function updateKnowledgeBase(
 async function decrementStaleSkeletons(): Promise<number> {
   const fourWeeksAgo = new Date(Date.now() - 28 * 24 * 60 * 60 * 1000).toISOString();
 
-  const { data: stale } = await supabase
+  const { data: stale, error: fetchErr } = await supabase
     .from('seo_title_skeletons')
     .select('*')
     .lt('updated_at', fourWeeksAgo)
     .gt('weight', 0.1);
+
+  if (fetchErr) {
+    console.error('[Viral Learner] Error fetching stale skeletons:', fetchErr);
+    return 0;
+  }
 
   if (!stale?.length) return 0;
 
   let count = 0;
   for (const skeleton of stale) {
     const newWeight = Math.max((skeleton.weight ?? 1.0) - 0.1, 0.1);
-    const updates: Record<string, unknown> = {
-      weight: Math.round(newWeight * 10) / 10,
-      updated_at: new Date().toISOString(),
-    };
-    if (newWeight <= 0.1) {
-      updates.deprecated = true;
+    const { error: updateErr } = await supabase
+      .from('seo_title_skeletons')
+      .update({ weight: Math.round(newWeight * 10) / 10 })
+      .eq('id', skeleton.id)
+      .select();
+    if (updateErr) {
+      console.error(`[Viral Learner] Error decaying skeleton ${skeleton.id}:`, updateErr);
+    } else {
+      count++;
     }
-    await supabase.from('seo_title_skeletons').update(updates).eq('id', skeleton.id);
-    count++;
   }
 
   return count;
@@ -476,8 +528,8 @@ export async function runViralLearner(): Promise<WeeklyReport> {
 
   // 6. Generate report
   const topHooks = analyses
-    .filter(a => a.hook_technique)
-    .map(a => a.hook_technique)
+    .filter(a => a.rhetoric_technique)
+    .map(a => a.rhetoric_technique)
     .slice(0, 5);
 
   const report = await generateWeeklyReport(
