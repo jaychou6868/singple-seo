@@ -14,6 +14,7 @@ import { streamSSE } from 'hono/streaming';
 import { Storage } from '@google-cloud/storage';
 import { createClient } from '@supabase/supabase-js';
 import { processVideoSeo, deleteGcsObject } from './seo-video.js';
+import { runViralLearner } from './viral-learner.js';
 import { nanoid } from 'nanoid';
 
 // ── Config ──────────────────────────────────────────────────
@@ -288,4 +289,16 @@ seoRoutes.delete('/jobs/:jobId', async (c) => {
   const { error } = await supabase.from('seo_jobs').delete().eq('id', jobId);
   if (error) return c.json({ error: error.message }, 500);
   return c.json({ ok: true });
+});
+
+// ── Viral Learner: Manual trigger ──────────────────────────
+
+seoRoutes.post('/viral-learn', async (c) => {
+  try {
+    const result = await runViralLearner();
+    return c.json({ ok: true, result });
+  } catch (err) {
+    console.error('Viral Learner error:', err);
+    return c.json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
+  }
 });
