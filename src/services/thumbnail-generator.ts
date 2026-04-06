@@ -159,8 +159,11 @@ async function callGeminiImage(prompt: string): Promise<string> {
   const payload = {
     contents: [{ parts: [{ text: prompt }] }],
     generationConfig: {
-      responseModalities: ['IMAGE'],
+      responseModalities: ['TEXT', 'IMAGE'],
       temperature: 0.9,
+    },
+    imageConfig: {
+      aspectRatio: '16:9',
     },
   };
 
