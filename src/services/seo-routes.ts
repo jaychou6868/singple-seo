@@ -72,65 +72,82 @@ export const seoRoutes = new Hono();
   }
 })();
 
-// ── Upload: Direct file upload (skip R2) ────────────────────
+// ── Upload: Two-step (init + stream file) ───────────────────
 
-seoRoutes.post('/upload', async (c) => {
+// Step 1: Create job with metadata
+seoRoutes.post('/upload/init', async (c) => {
   try {
-    const body = await c.req.parseBody();
+    const { fileName, fileSize, description, videoType, duration, thumbnail } = await c.req.json();
+    if (!fileName) return c.json({ error: 'Missing fileName' }, 400);
 
-    const file = body['file'];
-    if (!file || !(file instanceof File)) {
-      return c.json({ error: 'Missing file' }, 400);
-    }
-
-    const fileName = (body['fileName'] as string) || file.name || 'video.mp4';
-    const description = (body['description'] as string) || '';
-    const videoType = (body['videoType'] as string) || 'auto';
-    const duration = parseFloat((body['duration'] as string) || '0');
-    const thumbnail = (body['thumbnail'] as string) || '';
-
-    // Validate file size (1GB max for direct upload)
-    if (file.size > 1 * 1024 * 1024 * 1024) {
-      return c.json({ error: '檔案大小超過 1GB 限制' }, 400);
-    }
-
-    // Generate job ID and save to /tmp
     const jobId = nanoid();
     const tmpDir = `/tmp/seo-${jobId}`;
     fs.mkdirSync(tmpDir, { recursive: true });
-    const videoPath = `${tmpDir}/video.mp4`;
 
-    // Stream file to disk (avoid loading entire file into memory)
-    const arrayBuf = await file.arrayBuffer();
-    const nodeStream = Readable.from(Buffer.from(arrayBuf));
-    await pipeline(nodeStream, fs.createWriteStream(videoPath));
-
-    const fileSize = fs.statSync(videoPath).size;
-    console.log(`[SEO] Upload saved: ${videoPath} (${fileSize} bytes)`);
-
-    // Create seo_jobs record — file_key stores the /tmp path
     const { data: job, error } = await supabase.from('seo_jobs').insert({
       id: jobId,
       status: 'pending',
       progress: 0,
-      stage: 'uploaded',
-      stage_detail: '影片已上傳，等待處理',
-      file_key: videoPath,
+      stage: 'waiting_upload',
+      stage_detail: '等待影片上傳',
+      file_key: `${tmpDir}/video.mp4`,
       file_name: fileName,
-      file_size: fileSize,
-      description,
+      file_size: fileSize || 0,
+      description: description || '',
       video_type: (duration && duration > 60) ? 'long' : (videoType || 'auto'),
       caption: thumbnail ? { thumbnail } : null,
       source: 'web',
     }).select().single();
 
     if (error) {
-      // Clean up tmp on DB error
       try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
       throw error;
     }
 
-    return c.json({ jobId: job!.id, status: 'pending' });
+    return c.json({ jobId: job.id });
+  } catch (err) {
+    console.error('Upload init error:', err);
+    return c.json({ error: 'Failed to create job' }, 500);
+  }
+});
+
+// Step 2: Stream raw video to disk (no multipart, no memory buffering)
+seoRoutes.post('/upload/file/:jobId', async (c) => {
+  const jobId = c.req.param('jobId');
+  try {
+    const tmpDir = `/tmp/seo-${jobId}`;
+    const videoPath = `${tmpDir}/video.mp4`;
+
+    if (!fs.existsSync(tmpDir)) {
+      return c.json({ error: 'Job not found' }, 404);
+    }
+
+    // Stream request body directly to disk
+    const body = c.req.raw.body;
+    if (!body) return c.json({ error: 'No file data' }, 400);
+
+    const reader = body.getReader();
+    const writeStream = fs.createWriteStream(videoPath);
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      writeStream.write(value);
+    }
+    writeStream.end();
+    await new Promise((resolve) => writeStream.on('finish', resolve));
+
+    const fileSize = fs.statSync(videoPath).size;
+    console.log(`[SEO] Upload saved: ${videoPath} (${fileSize} bytes)`);
+
+    // Update job: file uploaded, ready to process
+    await supabase.from('seo_jobs').update({
+      stage: 'uploaded',
+      stage_detail: '影片已上傳，等待處理',
+      file_size: fileSize,
+    }).eq('id', jobId);
+
+    return c.json({ jobId, status: 'pending' });
   } catch (err) {
     console.error('Upload error:', err);
     return c.json({ error: 'Upload failed' }, 500);
