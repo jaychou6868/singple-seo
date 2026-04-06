@@ -15,6 +15,8 @@ import { Storage } from '@google-cloud/storage';
 import { createClient } from '@supabase/supabase-js';
 import { processVideoSeo, deleteGcsObject } from './seo-video.js';
 import { runViralLearner, testViralLearnerSave } from './viral-learner.js';
+import { runThumbnailLearner } from './thumbnail-learner.js';
+import { generateThumbnails } from './thumbnail-generator.js';
 import { nanoid } from 'nanoid';
 
 // ── Config ──────────────────────────────────────────────────
@@ -168,6 +170,7 @@ seoRoutes.get('/process/:jobId', async (c) => {
             titles: result.titles,
             episodeNumber: result.episodeNumber,
             transcript: result.transcript,
+            thumbnailTimestamps: result.thumbnailTimestamps,
           },
         }),
         event: 'done',
@@ -349,6 +352,80 @@ seoRoutes.delete('/kb-test-cleanup', async (c) => {
   });
 });
 
+// ── Thumbnail: Generate candidates ────────────────────────
+
+seoRoutes.post('/thumbnail/generate', async (c) => {
+  try {
+    const { jobId, frames, title, videoSummary, videoType } = await c.req.json();
+    if (!jobId || !frames?.length || !title) {
+      return c.json({ error: 'Missing jobId, frames, or title' }, 400);
+    }
+
+    // Run thumbnail generation (async, returns when done)
+    const result = await generateThumbnails({
+      jobId,
+      frames,
+      title,
+      videoSummary: videoSummary || '',
+      videoType: videoType || 'tutorial',
+    });
+
+    return c.json({ ok: true, candidates: result.candidates });
+  } catch (err) {
+    console.error('Thumbnail generation error:', err);
+    return c.json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
+  }
+});
+
+// ── Thumbnail: Get candidates ─────────────────────────────
+
+seoRoutes.get('/thumbnail/candidates/:jobId', async (c) => {
+  const jobId = c.req.param('jobId');
+  const { data, error } = await supabase
+    .from('seo_thumbnail_candidates')
+    .select('*')
+    .eq('job_id', jobId)
+    .order('created_at');
+
+  if (error) return c.json({ error: error.message }, 500);
+  return c.json({ data });
+});
+
+// ── Thumbnail: Select candidate ───────────────────────────
+
+seoRoutes.post('/thumbnail/select', async (c) => {
+  const { jobId, candidateId } = await c.req.json();
+
+  // Unselect all for this job
+  await supabase.from('seo_thumbnail_candidates')
+    .update({ selected: false })
+    .eq('job_id', jobId);
+
+  // Select the chosen one
+  const { data, error } = await supabase.from('seo_thumbnail_candidates')
+    .update({ selected: true })
+    .eq('id', candidateId)
+    .select()
+    .single();
+
+  if (error) return c.json({ error: error.message }, 500);
+
+  // Boost the pattern weight for learning
+  if (data?.pattern_id) {
+    const { data: pattern } = await supabase.from('seo_thumbnail_patterns')
+      .select('weight')
+      .eq('id', data.pattern_id)
+      .single();
+    if (pattern) {
+      await supabase.from('seo_thumbnail_patterns')
+        .update({ weight: Math.min((pattern.weight || 1) + 0.2, 3.0) })
+        .eq('id', data.pattern_id);
+    }
+  }
+
+  return c.json({ ok: true });
+});
+
 // ── Viral Learner: Test save pipeline (bypass YouTube) ────
 
 seoRoutes.post('/viral-learn-test', async (c) => {
@@ -366,6 +443,19 @@ seoRoutes.post('/viral-learn-test', async (c) => {
 seoRoutes.post('/viral-learn', async (c) => {
   try {
     const result = await runViralLearner();
+
+    // Chain Thumbnail Learner: use overperformer videoIds from Viral Learner tracker
+    const { data: tracker } = await supabase
+      .from('seo_trackers')
+      .select('data')
+      .eq('id', 'viral_learner')
+      .single();
+    const latestReport = tracker?.data?.reports?.slice(-1)?.[0];
+    if (latestReport?.overperformerIds?.length) {
+      console.log(`[Viral Learn] Chaining Thumbnail Learner with ${latestReport.overperformerIds.length} IDs`);
+      runThumbnailLearner(latestReport.overperformerIds).catch(console.error);
+    }
+
     return c.json({ ok: true, result });
   } catch (err) {
     console.error('Viral Learner error:', err);

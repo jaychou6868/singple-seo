@@ -73,6 +73,7 @@ interface WeeklyReport {
   newPatterns: number;
   skeletonsUpdated: number;
   topHooks: string[];
+  overperformerIds: string[];
 }
 
 // ── Channel stats cache ─────────────────────────────────────
@@ -424,6 +425,7 @@ async function generateWeeklyReport(
   newPatterns: number,
   skeletonsUpdated: number,
   topHooks: string[],
+  overperformerIds: string[] = [],
 ): Promise<WeeklyReport> {
   const report: WeeklyReport = {
     date: new Date().toISOString().split('T')[0],
@@ -432,6 +434,7 @@ async function generateWeeklyReport(
     newPatterns,
     skeletonsUpdated,
     topHooks,
+    overperformerIds,
   };
 
   // Store report in seo_trackers
@@ -515,12 +518,14 @@ export async function runViralLearner(): Promise<WeeklyReport> {
     .map(a => a.rhetoric_technique)
     .slice(0, 5);
 
+  const overperformerIds = overperformers.map(v => v.videoId);
   const report = await generateWeeklyReport(
     allVideos.length,
     overperformers.length,
     newPatterns,
     updatedSkeletons,
     topHooks,
+    overperformerIds,
   );
 
   console.log('[Viral Learner] Weekly report:', JSON.stringify(report));

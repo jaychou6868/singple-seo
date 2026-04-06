@@ -61,6 +61,7 @@ interface SeoResult {
   titles: Record<string, unknown>[];
   episodeNumber: number | null;
   transcript?: string;
+  thumbnailTimestamps?: { timestamp: number; description: string }[];
 }
 
 // ── Progress updater ────────────────────────────────────────
@@ -148,7 +149,7 @@ async function analyzeVideoWithGemini(
   description: string,
   jobId: string,
   onProgress?: ProgressCallback,
-): Promise<{ analysis: string; transcript: string }> {
+): Promise<{ analysis: string; transcript: string; fileUri: string }> {
   await updateJobProgress(jobId, 10, 'preparing', '準備影片中（GCS 直讀）...', onProgress);
 
   // Register GCS file with Gemini (OAuth + /v1beta/files:register)
@@ -228,7 +229,73 @@ async function analyzeVideoWithGemini(
     if (analysisParts[i].text) { analysisText = analysisParts[i].text; break; }
   }
 
-  return { analysis: analysisText, transcript };
+  return { analysis: analysisText, transcript, fileUri };
+}
+
+// ── Thumbnail Frame Timestamps (separate Gemini call) ───────
+
+async function extractThumbnailTimestamps(
+  fileUri: string,
+): Promise<{ timestamp: number; description: string }[]> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  const videoFilePart = { fileData: { mimeType: 'video/mp4', fileUri } };
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            videoFilePart,
+            { text: `你是 YouTube 封面選擇專家。分析影片中的人物表情和構圖，選出最適合做 YouTube 封面的 5 個時間點。
+
+選擇標準：
+1. 人物臉部清晰、表情生動（驚訝、興奮、認真講解）
+2. 構圖好（人物不要太小、不要被遮擋）
+3. 背景不要太雜亂
+4. 盡量分散在影片的不同段落
+
+如果影片沒有出現人物，選擇視覺上最吸引人的畫面。
+
+輸出 JSON 陣列：
+[
+  {"timestamp": 23.5, "description": "講者驚訝表情，手勢誇張", "people_count": 1},
+  ...
+]
+
+只輸出 JSON，不要其他文字。` },
+          ],
+        }],
+        generationConfig: {
+          temperature: 0.5,
+          maxOutputTokens: 2048,
+          thinkingConfig: { thinkingLevel: 'medium' },
+        },
+      }),
+    }).then(r => r.json() as Promise<any>);
+
+    const parts = res?.candidates?.[0]?.content?.parts || [];
+    let text = '';
+    for (let i = parts.length - 1; i >= 0; i--) {
+      if (parts[i].text) { text = parts[i].text; break; }
+    }
+
+    if (!text) return [];
+    const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
+    try {
+      return JSON.parse(cleaned);
+    } catch {
+      const match = cleaned.match(/\[[\s\S]*\]/);
+      if (match) {
+        try { return JSON.parse(match[0]); } catch { /* fall through */ }
+      }
+    }
+    return [];
+  } catch (err) {
+    console.error('[SEO] Thumbnail timestamp extraction failed:', err);
+    return [];
+  }
 }
 
 // ── SEO Caption Generation ──────────────────────────────────
@@ -569,12 +636,14 @@ export async function processVideoSeo(
   const content = result.transcript;
   const videoAnalysis: string | null = result.analysis;
 
-  // Generate SEO caption + YouTube titles IN PARALLEL
-  await updateJobProgress(jobId, 45, 'generating_caption', '並行生成 SEO 文案 + YouTube 標題...', onProgress);
-  const [captionRaw, titlesRaw] = await Promise.all([
+  // Generate SEO caption + YouTube titles + thumbnail timestamps IN PARALLEL
+  await updateJobProgress(jobId, 45, 'generating_caption', '並行生成 SEO 文案 + YouTube 標題 + 封面分析...', onProgress);
+  const [captionRaw, titlesRaw, thumbnailTimestamps] = await Promise.all([
     generateSeoCaption(content, description, videoAnalysis),
     generateYouTubeTitles(content, {} as any, videoAnalysis),
+    extractThumbnailTimestamps(result.fileUri),
   ]);
+  console.log(`[SEO] Thumbnail timestamps: ${JSON.stringify(thumbnailTimestamps)}`);
   let caption = captionRaw;
   if (!caption) throw new Error('SEO caption generation failed');
   caption.source_model = 'gemini-3.1-pro';
@@ -641,5 +710,5 @@ export async function processVideoSeo(
     console.error(`[SEO] GCS cleanup failed: ${err}`);
   });
 
-  return { caption, titles, episodeNumber, transcript: content };
+  return { caption, titles, episodeNumber, transcript: content, thumbnailTimestamps };
 }
