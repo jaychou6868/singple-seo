@@ -545,31 +545,17 @@ async function compositeCandidate(
   return result;
 }
 
-// ── Step 5: Upload to Supabase Storage ─────────────────────
+// ── Step 5: Convert to data URL (no external storage needed) ─
 
 async function uploadCandidate(
   jobId: string,
   candidateIndex: number,
   imageBuffer: Buffer,
 ): Promise<string> {
-  const path = `thumbnails/${jobId}/candidate_${candidateIndex}.jpg`;
-
-  const { error } = await supabase.storage
-    .from('seo-assets')
-    .upload(path, imageBuffer, {
-      contentType: 'image/jpeg',
-      upsert: true,
-    });
-
-  if (error) {
-    throw new Error(`Supabase upload failed for ${path}: ${error.message}`);
-  }
-
-  const { data: urlData } = supabase.storage
-    .from('seo-assets')
-    .getPublicUrl(path);
-
-  return urlData.publicUrl;
+  // Store as base64 data URL — each thumbnail is ~100-200KB JPEG
+  // This avoids needing a Supabase Storage bucket or GCS setup
+  const base64 = imageBuffer.toString('base64');
+  return `data:image/jpeg;base64,${base64}`;
 }
 
 // ── Main Export ─────────────────────────────────────────────
