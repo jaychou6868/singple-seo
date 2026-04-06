@@ -275,71 +275,43 @@
 <div id="stepList" class="relative">
 <div class="absolute left-[11px] top-2 bottom-2 w-[2px] bg-surface-container"></div>
 <ul class="space-y-6 relative">
-<!-- Step 1 -->
-<li class="flex items-start gap-4 step-item" data-step="video_analysis">
+<li class="flex items-start gap-4 step-item" data-step="preparing">
 <div class="z-10 bg-white rounded-full flex items-center justify-center">
 <span class="material-symbols-outlined text-outline-variant font-bold text-xl" data-icon="radio_button_unchecked">radio_button_unchecked</span>
 </div>
-<span class="text-sm font-medium text-text-sub">影片分析</span>
+<span class="text-sm font-medium text-text-sub">影片準備與上傳</span>
 </li>
-<!-- Step 2 -->
-<li class="flex items-start gap-4 step-item" data-step="audio_transcription">
+<li class="flex items-start gap-4 step-item" data-step="analyzing">
 <div class="z-10 bg-white rounded-full flex items-center justify-center">
 <span class="material-symbols-outlined text-outline-variant font-bold text-xl" data-icon="radio_button_unchecked">radio_button_unchecked</span>
 </div>
-<span class="text-sm font-medium text-text-sub">音訊轉錄</span>
+<span class="text-sm font-medium text-text-sub">AI 影片分析</span>
 </li>
-<!-- Step 3 -->
-<li class="flex items-start gap-4 step-item" data-step="content_understanding">
+<li class="flex items-start gap-4 step-item" data-step="generating">
 <div class="z-10 bg-white rounded-full flex items-center justify-center">
 <span class="material-symbols-outlined text-outline-variant font-bold text-xl" data-icon="radio_button_unchecked">radio_button_unchecked</span>
 </div>
-<span class="text-sm font-medium text-text-sub">內容理解</span>
+<span class="text-sm font-medium text-text-sub">文案與標題生成</span>
 </li>
-<!-- Step 4 -->
-<li class="flex items-start gap-4 step-item" data-step="keyword_research">
+<li class="flex items-start gap-4 step-item" data-step="reviewing">
 <div class="z-10 bg-white rounded-full flex items-center justify-center">
 <span class="material-symbols-outlined text-outline-variant font-bold text-xl" data-icon="radio_button_unchecked">radio_button_unchecked</span>
 </div>
-<span class="text-sm font-medium text-text-sub">關鍵字研究</span>
+<span class="text-sm font-medium text-text-sub">NLP 品質審核</span>
 </li>
-<!-- Step 5 -->
-<li class="flex items-start gap-4 step-item" data-step="seo_copy">
+<li class="flex items-start gap-4 step-item" data-step="numbering">
 <div class="z-10 bg-white rounded-full flex items-center justify-center">
 <span class="material-symbols-outlined text-outline-variant font-bold text-xl" data-icon="radio_button_unchecked">radio_button_unchecked</span>
 </div>
-<span class="text-sm font-medium text-text-sub">SEO 文案生成</span>
+<span class="text-sm font-medium text-text-sub">YouTube 編號</span>
 </li>
-<!-- Step 6 -->
-<li class="flex items-start gap-4 step-item" data-step="title_generation">
+<li class="flex items-start gap-4 step-item" data-step="saving">
 <div class="z-10 bg-white rounded-full flex items-center justify-center">
 <span class="material-symbols-outlined text-outline-variant font-bold text-xl" data-icon="radio_button_unchecked">radio_button_unchecked</span>
 </div>
-<span class="text-sm font-medium text-text-sub">YouTube 標題生成</span>
+<span class="text-sm font-medium text-text-sub">儲存結果</span>
 </li>
-<!-- Step 7 -->
-<li class="flex items-start gap-4 step-item" data-step="hashtag_generation">
-<div class="z-10 bg-white rounded-full flex items-center justify-center">
-<span class="material-symbols-outlined text-outline-variant font-bold text-xl" data-icon="radio_button_unchecked">radio_button_unchecked</span>
-</div>
-<span class="text-sm font-medium text-text-sub">Hashtag 生成</span>
-</li>
-<!-- Step 8 -->
-<li class="flex items-start gap-4 step-item" data-step="alt_text">
-<div class="z-10 bg-white rounded-full flex items-center justify-center">
-<span class="material-symbols-outlined text-outline-variant font-bold text-xl" data-icon="radio_button_unchecked">radio_button_unchecked</span>
-</div>
-<span class="text-sm font-medium text-text-sub">Alt Text 生成</span>
-</li>
-<!-- Step 9 -->
-<li class="flex items-start gap-4 step-item" data-step="nlp_review">
-<div class="z-10 bg-white rounded-full flex items-center justify-center">
-<span class="material-symbols-outlined text-outline-variant font-bold text-xl" data-icon="radio_button_unchecked">radio_button_unchecked</span>
-</div>
-<span class="text-sm font-medium text-text-sub">NLP 審核</span>
-</li>
-<!-- Step 10 -->
-<li class="flex items-start gap-4 step-item" data-step="final_assembly">
+<li class="flex items-start gap-4 step-item" data-step="done">
 <div class="z-10 bg-white rounded-full flex items-center justify-center">
 <span class="material-symbols-outlined text-outline-variant font-bold text-xl" data-icon="radio_button_unchecked">radio_button_unchecked</span>
 </div>
@@ -379,7 +351,7 @@
 <aside class="lg:col-span-4">
 <div class="bg-white border border-surface-container rounded-xl p-6 sticky top-24 shadow-sm">
 <div class="flex justify-between items-center mb-6">
-<h2 class="font-bold text-lg text-text-main font-headline" id="progressTitle">生成進度 0/10</h2>
+<h2 class="font-bold text-lg text-text-main font-headline" id="progressTitle">生成進度 0/7</h2>
 <span class="text-brand-peach font-mono font-bold" id="progressPct">0%</span>
 </div>
 <!-- Progress Bar -->
@@ -388,45 +360,33 @@
 </div>
 <!-- Timeline -->
 <div class="space-y-4" id="progressTimeline">
-<div class="step-item flex items-center gap-4 text-text-sub" data-step="video_analysis">
+<div class="step-item flex items-center gap-4 text-text-sub" data-step="preparing">
 <span class="material-symbols-outlined text-xl">check_box_outline_blank</span>
-<span class="text-sm font-medium">影片分析</span>
+<span class="text-sm font-medium">影片準備與上傳</span>
 </div>
-<div class="step-item flex items-center gap-4 text-text-sub" data-step="audio_transcription">
+<div class="step-item flex items-center gap-4 text-text-sub" data-step="analyzing">
 <span class="material-symbols-outlined text-xl">check_box_outline_blank</span>
-<span class="text-sm font-medium">音訊轉錄</span>
+<span class="text-sm font-medium">AI 影片分析</span>
 </div>
-<div class="step-item flex items-center gap-4 text-text-sub" data-step="content_understanding">
+<div class="step-item flex items-center gap-4 text-text-sub" data-step="generating">
 <span class="material-symbols-outlined text-xl">check_box_outline_blank</span>
-<span class="text-sm font-medium">內容理解</span>
+<span class="text-sm font-medium">文案與標題生成</span>
 </div>
-<div class="step-item flex items-center gap-4 text-text-sub" data-step="keyword_research">
+<div class="step-item flex items-center gap-4 text-text-sub" data-step="reviewing">
 <span class="material-symbols-outlined text-xl">check_box_outline_blank</span>
-<span class="text-sm font-medium">關鍵字研究</span>
+<span class="text-sm font-medium">NLP 品質審核</span>
 </div>
-<div class="step-item flex items-center gap-4 text-text-sub" data-step="seo_copy">
+<div class="step-item flex items-center gap-4 text-text-sub" data-step="numbering">
 <span class="material-symbols-outlined text-xl">check_box_outline_blank</span>
-<span class="text-sm font-medium">SEO 文案生成</span>
+<span class="text-sm font-medium">YouTube 編號</span>
 </div>
-<div class="step-item flex items-center gap-4 text-text-sub" data-step="title_generation">
+<div class="step-item flex items-center gap-4 text-text-sub" data-step="saving">
 <span class="material-symbols-outlined text-xl">check_box_outline_blank</span>
-<span class="text-sm font-medium">標題候選生成</span>
+<span class="text-sm font-medium">儲存結果</span>
 </div>
-<div class="step-item flex items-center gap-4 text-text-sub" data-step="hashtag_generation">
+<div class="step-item flex items-center gap-4 text-text-sub" data-step="done">
 <span class="material-symbols-outlined text-xl">check_box_outline_blank</span>
-<span class="text-sm font-medium">Hashtag 生成</span>
-</div>
-<div class="step-item flex items-center gap-4 text-text-sub" data-step="alt_text">
-<span class="material-symbols-outlined text-xl">check_box_outline_blank</span>
-<span class="text-sm font-medium">Alt Text 生成</span>
-</div>
-<div class="step-item flex items-center gap-4 text-text-sub" data-step="nlp_review">
-<span class="material-symbols-outlined text-xl">check_box_outline_blank</span>
-<span class="text-sm font-medium">NLP 審核</span>
-</div>
-<div class="step-item flex items-center gap-4 text-text-sub" data-step="final_assembly">
-<span class="material-symbols-outlined text-xl">check_box_outline_blank</span>
-<span class="text-sm font-medium">最終整合</span>
+<span class="text-sm font-medium">完成</span>
 </div>
 </div>
 <div class="mt-8 pt-6 border-t border-surface-container">
@@ -586,7 +546,7 @@
         <span class="material-symbols-outlined">model_training</span>
         AI 學習引擎
       </h3>
-      <p class="text-sm text-text-sub mt-1">自動學習 YouTube 跨類目爆款標題模式</p>
+      <p class="text-sm text-text-sub mt-1">自動學習跨類目爆款結構（標題、Hook、CTA、話術、情感觸發、內容框架）</p>
       <p class="text-xs text-text-sub mt-1" id="lastLearnTime">上次學習：尚未執行</p>
     </div>
     <button onclick="triggerViralLearn()" id="learnBtn" class="px-5 py-2.5 bg-brand-peach text-white rounded-xl font-bold text-sm hover:bg-[#d4654f] transition-all flex items-center gap-2">
@@ -624,43 +584,33 @@ const SEO_BASE = 'https://singple-seo.zeabur.app';
 
 // Backend stage → HTML step-item data-step mapping
 const STAGE_TO_STEP = {
-    'starting': 'video_analysis',
-    'preparing': 'video_analysis',
-    'uploading_gemini': 'video_analysis',
-    'analyzing': 'content_understanding',
-    'generating_caption': 'seo_copy',
-    'reviewing_caption': 'seo_copy',
-    'generating_titles': 'title_generation',
-    'reviewing_titles': 'title_generation',
-    'numbering': 'final_assembly',
-    'saving': 'final_assembly',
-    'done': 'final_assembly',
+    'starting': 'preparing',
+    'preparing': 'preparing',
+    'uploading_gemini': 'preparing',
+    'analyzing': 'analyzing',
+    'generating_caption': 'generating',
+    'reviewing_caption': 'reviewing',
+    'numbering': 'numbering',
+    'saving': 'saving',
+    'done': 'done',
 };
 
 // HTML step order (matches data-step attributes)
 const HTML_STEPS = [
-    'video_analysis', 'audio_transcription', 'content_understanding',
-    'keyword_research', 'seo_copy', 'title_generation',
-    'hashtag_generation', 'alt_text', 'nlp_review', 'final_assembly'
+    'preparing', 'analyzing', 'generating', 'reviewing',
+    'numbering', 'saving', 'done'
 ];
 
 const STEP_LABELS = {
     starting: '開始處理',
-    preparing: '準備影片',
-    uploading_gemini: 'Gemini 註冊影片',
-    analyzing: '影片分析',
-    generating_caption: 'SEO 文案生成',
-    reviewing_caption: 'NLP 文案審核',
-    generating_titles: 'YouTube 標題生成',
-    reviewing_titles: 'NLP 標題審核',
-    numbering: 'YouTube 編號',
+    preparing: '影片準備與上傳',
+    uploading_gemini: '向 Gemini 註冊影片',
+    analyzing: 'AI 影片分析',
+    generating_caption: '文案與標題生成中',
+    reviewing_caption: 'NLP 品質審核中',
+    numbering: 'YouTube 編號查詢',
     saving: '儲存結果',
     done: '完成',
-    title_generation: '標題候選生成',
-    hashtag_generation: 'Hashtag 生成',
-    alt_text: 'Alt Text 生成',
-    nlp_review: 'NLP 審核',
-    final_assembly: '最終整合'
 };
 
 let selectedFile = null;
@@ -1001,7 +951,10 @@ function updateProgress(data) {
     if ($progressBarProc) $progressBarProc.style.width = pct + '%';
     const stage = data.stage || data.step || '';
     const detail = data.detail || '';
-    if ($progressTitle) $progressTitle.textContent = `生成進度`;
+    const mappedStepForTitle = STAGE_TO_STEP[stage] || '';
+    const stepIdx = HTML_STEPS.indexOf(mappedStepForTitle);
+    const completedCount = stepIdx >= 0 ? stepIdx : 0;
+    if ($progressTitle) $progressTitle.textContent = `生成進度 ${completedCount}/${HTML_STEPS.length}`;
     if ($processingStepLabel) $processingStepLabel.textContent = detail || STEP_LABELS[stage] || stage || '處理中';
 
     // Also update upload-state sidebar (Stitch big number)

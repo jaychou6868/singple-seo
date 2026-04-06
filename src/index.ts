@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
+import { serveStatic } from '@hono/node-server/serve-static';
 import { cors } from 'hono/cors';
 import cron from 'node-cron';
 import { seoRoutes } from './services/seo-routes.js';
@@ -12,6 +13,9 @@ app.use('*', cors({
   origin: ['https://singple-marketing.zeabur.app', 'http://localhost:3000'],
   credentials: true,
 }));
+
+// Static files (logo, etc.)
+app.use('/public/*', serveStatic({ root: './src/' }));
 
 // Health check
 app.get('/health', (c) => c.json({ ok: true }));
