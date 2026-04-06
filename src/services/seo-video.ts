@@ -9,6 +9,7 @@
  */
 
 import { Storage } from '@google-cloud/storage';
+import { GoogleAuth } from 'google-auth-library';
 import { createClient } from '@supabase/supabase-js';
 
 // ── Config ──────────────────────────────────────────────────
@@ -35,6 +36,15 @@ if (process.env.GCS_KEY_JSON) {
 }
 const gcsStorage = new Storage(gcsStorageOptions);
 const gcsBucket = gcsStorage.bucket(GCS_BUCKET_NAME);
+
+// Reuse the same credentials for Gemini OAuth (files:register requires OAuth, not API key)
+let geminiAuth: GoogleAuth;
+if (process.env.GCS_KEY_JSON) {
+  const credentials = JSON.parse(Buffer.from(process.env.GCS_KEY_JSON, 'base64').toString());
+  geminiAuth = new GoogleAuth({ credentials, scopes: ['https://www.googleapis.com/auth/generative-language', 'https://www.googleapis.com/auth/cloud-platform'] });
+} else {
+  geminiAuth = new GoogleAuth({ keyFilename: './gcs-key.json', scopes: ['https://www.googleapis.com/auth/generative-language', 'https://www.googleapis.com/auth/cloud-platform'] });
+}
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
@@ -139,60 +149,38 @@ async function analyzeVideoWithGemini(
 ): Promise<{ analysis: string; transcript: string }> {
   await updateJobProgress(jobId, 10, 'preparing', '準備影片中（GCS 直讀）...', onProgress);
 
-  // Register GCS file with Gemini Files API
+  // Register GCS file with Gemini (OAuth + /v1beta/files:register)
   await updateJobProgress(jobId, 12, 'uploading_gemini', '向 Gemini 註冊 GCS 影片...', onProgress);
 
+  const authClient = await geminiAuth.getClient();
+  const tokenRes = await authClient.getAccessToken();
+  const accessToken = tokenRes.token;
+
   const registerRes = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/files?key=${GEMINI_API_KEY}`,
+    'https://generativelanguage.googleapis.com/v1beta/files:register',
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        file: {
-          display_name: `seo-${jobId}`,
-          uri: gcsUri,
-        },
-      }),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`,
+        'x-goog-user-project': 'gen-lang-client-0010622782',
+      },
+      body: JSON.stringify({ uris: [gcsUri] }),
     },
   );
 
   const registerData = await registerRes.json() as any;
   console.log(`[SEO] Gemini register GCS:`, JSON.stringify(registerData).substring(0, 300));
-  const geminiFileName = registerData?.file?.name;
-  let fileUri = registerData?.file?.uri;
-  const fileState = registerData?.file?.state;
+  const registeredFile = registerData?.files?.[0];
+  let fileUri = registeredFile?.uri;
 
-  if (!geminiFileName && !fileUri) {
+  if (!fileUri) {
     throw new Error(`Gemini GCS register failed: ${JSON.stringify(registerData).substring(0, 300)}`);
   }
 
-  // Poll until file is ACTIVE
-  await updateJobProgress(jobId, 15, 'uploading_gemini', 'Gemini 處理影片中...', onProgress);
-  let state = fileState || 'PROCESSING';
-  let pollAttempts = 0;
-  const maxPollAttempts = 120; // 10 min max (5s intervals)
-
-  while (state === 'PROCESSING' && pollAttempts < maxPollAttempts) {
-    await new Promise(r => setTimeout(r, 5000));
-    pollAttempts++;
-
-    const pollRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/${geminiFileName}?key=${GEMINI_API_KEY}`,
-    );
-    const pollData = await pollRes.json() as any;
-    state = pollData?.state || 'PROCESSING';
-    fileUri = pollData?.uri || fileUri;
-
-    if (pollAttempts % 6 === 0) {
-      console.log(`[SEO] Gemini file state: ${state} (poll #${pollAttempts})`);
-    }
-  }
-
-  if (state !== 'ACTIVE') {
-    throw new Error(`Gemini file not ready after polling: state=${state}`);
-  }
-
-  console.log(`[SEO] Gemini file ACTIVE: ${fileUri}`);
+  // Small delay for propagation (registered GCS files are immediately available)
+  await new Promise(r => setTimeout(r, 3000));
+  console.log(`[SEO] Gemini file registered: ${fileUri}`);
 
   // Analyze video
   const analysisUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;

@@ -11,6 +11,7 @@
     "@google-cloud/storage": "^7.19.0",
     "@hono/node-server": "^1.19.12",
     "@supabase/supabase-js": "^2.100.1",
+    "google-auth-library": "^10.6.2",
     "hono": "^4.12.9",
     "nanoid": "^5.1.7"
   },
