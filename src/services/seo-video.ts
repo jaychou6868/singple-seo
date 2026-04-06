@@ -11,6 +11,8 @@
 import { Storage } from '@google-cloud/storage';
 import { GoogleAuth } from 'google-auth-library';
 import { createClient } from '@supabase/supabase-js';
+import { selectDiverseSkeletons, buildDiversityConstraint, getRecentDNA, recordDNA } from './dna-tracker.js';
+import type { CaptionDNA } from './dna-tracker.js';
 
 // ── Config ──────────────────────────────────────────────────
 
@@ -242,6 +244,10 @@ async function generateSeoCaption(
   const recentHooks = trackerData?.data?.recent_hooks || [];
   const exampleText = examples?.map((e: any) => `[${e.angle || e.category}] ${e.content}`).join('\n') || '（無）';
 
+  // DNA diversity constraint
+  const recentDNA = await getRecentDNA(5);
+  const diversityConstraint = buildDiversityConstraint(recentDNA);
+
   const systemPrompt = `你是簡單歌唱工作室的 Instagram SEO 文案專家。用 Karen 的口語風格寫文案。
 
 ## Karen 的語氣
@@ -273,6 +279,7 @@ ${exampleText}
 - 不能堆砌關鍵字
 - 不能用「大家好」開頭
 - 最近用過的 hook 類型（避免重複）：${recentHooks.slice(-5).join(', ')}
+${diversityConstraint}
 
 ## 輸出 JSON
 {
@@ -359,15 +366,17 @@ async function generateYouTubeTitles(
   const { data: examples } = await supabase.from('seo_viral_examples').select('*').eq('type', 'title').limit(10);
 
   const tracker = trackerData?.data || {};
-  const recentSkeletons = tracker.recent_skeletons || [];
   const recentAngles = tracker.recent_angles || [];
   const angles = ['痛點', '反差', '數字', '場景', '挑戰', '權威', '結果', '否定'];
 
-  const availableSkeletons = (skeletons || []).filter((s: any) => !recentSkeletons.slice(-5).includes(s.id));
+  // Use DNA-aware diverse skeleton selection
+  const recentDNA = await getRecentDNA(10);
+  const diverseSkeletons = await selectDiverseSkeletons(skeletons || [], recentDNA, 5);
+  const diversityConstraint = buildDiversityConstraint(recentDNA);
+
   const availableAngles = angles.filter(a => !recentAngles.slice(-5).includes(a));
 
-  const skeletonText = (availableSkeletons.length >= 5 ? availableSkeletons : skeletons || [])
-    .slice(0, 5)
+  const skeletonText = diverseSkeletons
     .map((s: any) => `- ${s.id}: ${s.pattern}（例：${s.example}）`)
     .join('\n');
 
@@ -410,6 +419,7 @@ ${videoAnalysis ? `## 影片分析\n${videoAnalysis.substring(0, 500)}` : ''}
 ## 已生成的 SEO 文案
 Hook: ${caption.hook || ''}
 關鍵字: ${(caption.primary_keywords as string[] || []).join(', ')}
+${diversityConstraint}
 
 ## 輸出 JSON 陣列
 [{"title":"標題","skeleton_id":"骨架ID","angle":"角度","why":"原因","char_count":30}]
@@ -591,6 +601,18 @@ export async function processVideoSeo(
     t.full_title = `${t.title}${suffix}`;
     t.episode_number = episodeNumber;
   }
+
+  // Record DNA for diversity tracking
+  const dna: CaptionDNA = {
+    skeleton_id: (titles[0]?.skeleton_id as string) || '',
+    angle: (titles[0]?.angle as string) || '',
+    hook_type: (caption.hook_type as string) || '',
+    cta_type: (caption.cta_type as string) || '',
+    emotion: (caption.nlp_review as any)?.pain_level || '',
+    pain_level: (caption.nlp_review as any)?.pain_level || '',
+    technique: ((caption.nlp_review as any)?.techniques?.[0]) || '',
+  };
+  await recordDNA(jobId, dna);
 
   // Update shared trackers
   await updateTrackers(caption, titles);

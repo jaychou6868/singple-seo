@@ -1,7 +1,9 @@
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { cors } from 'hono/cors';
+import cron from 'node-cron';
 import { seoRoutes } from './services/seo-routes.js';
+import { runViralLearner } from './services/viral-learner.js';
 
 const app = new Hono();
 
@@ -25,6 +27,17 @@ app.get('/seo', async (c) => {
 
 // SEO routes
 app.route('/api/seo', seoRoutes);
+
+// ── Cron: Viral Learner (Every Monday 09:00 Taiwan / 01:00 UTC) ──
+cron.schedule('0 1 * * 1', async () => {
+  console.log('[Viral Learner] Weekly learning started');
+  try {
+    await runViralLearner();
+    console.log('[Viral Learner] Weekly learning completed');
+  } catch (err) {
+    console.error('[Viral Learner] Error:', err);
+  }
+});
 
 // Start
 const port = Number(process.env.PORT) || 3001;
