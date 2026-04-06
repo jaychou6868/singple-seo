@@ -366,6 +366,8 @@ async function updateKnowledgeBase(
         type: entry.type,
         category: entry.category,
         angle: entry.angle,
+        source: 'viral_learner',
+        quality_score: video.overperformanceRatio,
       }).select();
       if (exErr) {
         console.error(`[Viral Learner] Error inserting example (${entry.type}):`, JSON.stringify(exErr));
