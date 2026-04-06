@@ -14,7 +14,7 @@ import { streamSSE } from 'hono/streaming';
 import { Storage } from '@google-cloud/storage';
 import { createClient } from '@supabase/supabase-js';
 import { processVideoSeo, deleteGcsObject } from './seo-video.js';
-import { runViralLearner } from './viral-learner.js';
+import { runViralLearner, testViralLearnerSave } from './viral-learner.js';
 import { nanoid } from 'nanoid';
 
 // ── Config ──────────────────────────────────────────────────
@@ -322,6 +322,18 @@ seoRoutes.get('/kb-test-insert', async (c) => {
     await supabase.from('seo_viral_examples').delete().eq('id', data[0].id);
   }
   return c.json({ ok: true, inserted: data, message: 'Insert + delete succeeded' });
+});
+
+// ── Viral Learner: Test save pipeline (bypass YouTube) ────
+
+seoRoutes.post('/viral-learn-test', async (c) => {
+  try {
+    const result = await testViralLearnerSave();
+    return c.json({ ok: result.errors.length === 0, ...result });
+  } catch (err) {
+    console.error('Viral Learner test error:', err);
+    return c.json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
+  }
 });
 
 // ── Viral Learner: Manual trigger ──────────────────────────

@@ -526,3 +526,83 @@ export async function runViralLearner(): Promise<WeeklyReport> {
   console.log('[Viral Learner] Weekly report:', JSON.stringify(report));
   return report;
 }
+
+// ── Test mode: bypass YouTube, test Gemini→Save pipeline ───
+
+export async function testViralLearnerSave(): Promise<{
+  geminiOk: boolean;
+  analysisCount: number;
+  savedSkeletons: number;
+  savedExamples: number;
+  errors: string[];
+}> {
+  const errors: string[] = [];
+
+  // Mock overperformer data (real viral titles from various niches)
+  const mockOverperformers: OverperformerVideo[] = [
+    {
+      videoId: 'test_1',
+      title: '為什麼你練了三年還是唱不上去？問題不在你的喉嚨',
+      channelId: 'test_ch',
+      viewCount: 500000,
+      channelAvgViews: 50000,
+      overperformanceRatio: 10,
+      subscriberCount: 80000,
+    },
+    {
+      videoId: 'test_2',
+      title: '聲樂老師不會告訴你的 5 個練習秘密，學會直接進階',
+      channelId: 'test_ch2',
+      viewCount: 300000,
+      channelAvgViews: 40000,
+      overperformanceRatio: 7.5,
+      subscriberCount: 120000,
+    },
+  ];
+
+  // Step 1: Gemini analysis
+  console.log('[Test] Sending mock titles to Gemini...');
+  const titlesForAnalysis = mockOverperformers.map(v => ({
+    title: v.title,
+    views: v.viewCount,
+    ratio: v.overperformanceRatio,
+  }));
+
+  let analyses: GeminiAnalysis[] = [];
+  try {
+    analyses = await analyzeWithGemini(titlesForAnalysis);
+    console.log(`[Test] Gemini returned ${analyses.length} analyses`);
+  } catch (err) {
+    errors.push(`Gemini error: ${err instanceof Error ? err.message : String(err)}`);
+    return { geminiOk: false, analysisCount: 0, savedSkeletons: 0, savedExamples: 0, errors };
+  }
+
+  if (analyses.length === 0) {
+    errors.push('Gemini returned empty analysis');
+    return { geminiOk: true, analysisCount: 0, savedSkeletons: 0, savedExamples: 0, errors };
+  }
+
+  // Step 2: Save to KB
+  console.log('[Test] Saving to knowledge base...');
+  const { newPatterns, updatedSkeletons } = await updateKnowledgeBase(analyses, mockOverperformers);
+
+  // Step 3: Verify saved
+  const { data: examples } = await supabase
+    .from('seo_viral_examples')
+    .select('id, type, content, source')
+    .eq('source', 'viral_learner')
+    .order('learned_at', { ascending: false })
+    .limit(20);
+
+  const savedExamples = examples?.length || 0;
+
+  console.log(`[Test] Results: skeletons=${newPatterns}, examples=${savedExamples}`);
+
+  return {
+    geminiOk: true,
+    analysisCount: analyses.length,
+    savedSkeletons: newPatterns + updatedSkeletons,
+    savedExamples,
+    errors,
+  };
+}
