@@ -521,43 +521,29 @@ async function generateDesignBackground(
 
   console.log(`[Thumbnail Generator] Generating background #${candidateIndex} (layout=${layoutType}, ref=${reference.video_id || reference.id})`);
 
+  // Karen 2026-04-07 v22: removed the ghost-person detect-retry loop —
+  // it added 3x latency and pushed total generation past Zeabur's 100s
+  // proxy timeout. With imgly cutout extending past canvas edges and
+  // covering ~70% width, any Gemini-drawn ghost person in the
+  // background is barely visible. Single attempt is enough.
   let lastError: Error | null = null;
-
-  // Up to 3 attempts: each attempt generates + person-checks. If person
-  // detected, the next attempt has a stronger no-person clause prepended.
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const attemptPrompt = attempt === 0
-        ? prompt
-        : `🚫 ABSOLUTE RULE: This image must NOT contain any person, face, hand, arm, body, human figure, or any humanoid silhouette. The previous attempt failed because you drew a person — do not draw any. Empty scene only.\n\n${prompt}`;
-
-      const base64Image = await callGeminiImageMultiRef(prompt === attemptPrompt ? prompt : attemptPrompt, referenceImages, 0.95);
+      const base64Image = await callGeminiImageMultiRef(prompt, referenceImages, 0.95);
       const buffer = Buffer.from(base64Image, 'base64');
-
       const resized = await sharp(buffer)
         .resize(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT, { fit: 'cover' })
         .jpeg({ quality: 95 })
         .toBuffer();
-
-      // Quality gate: ensure background has no person
-      const isClean = await backgroundHasNoPerson(resized);
-      if (isClean) {
-        if (attempt > 0) {
-          console.log(`[Thumbnail Generator] background #${candidateIndex} clean on attempt ${attempt + 1}`);
-        }
-        return resized;
-      }
-
-      console.warn(`[Thumbnail Generator] background #${candidateIndex} contains person on attempt ${attempt + 1}, retrying`);
-      lastError = new Error('background contained drawn person');
+      return resized;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
-      console.warn(`[Thumbnail Generator] Background generation attempt ${attempt + 1} failed for #${candidateIndex}: ${lastError.message}`);
+      console.warn(`[Thumbnail Generator] Background gen attempt ${attempt + 1} failed for #${candidateIndex}: ${lastError.message}`);
+      if (attempt === 0) await new Promise(r => setTimeout(r, 1500));
     }
-    await new Promise(r => setTimeout(r, 2000));
   }
 
-  throw lastError || new Error(`Background generation failed for candidate #${candidateIndex} after 3 attempts`);
+  throw lastError || new Error(`Background generation failed for candidate #${candidateIndex}`);
 }
 
 /**
