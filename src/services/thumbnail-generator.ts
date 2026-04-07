@@ -578,12 +578,36 @@ function getPersonPlacement(layoutType: string): {
  * literally draws a checkerboard pattern, which is unusable.
  */
 async function removeBackgroundFromFrame(personFrameBase64: string): Promise<Buffer> {
-  const greenScreenPrompt =
-    'Take this photo and replace the entire background with pure solid green color ' +
-    '(#00FF00, RGB 0,255,0). Keep the person (face, hair, body, clothing) EXACTLY as-is, ' +
-    'do not modify them in any way. Only the background area (walls, room, furniture) ' +
-    'should become solid green. Do not draw a checkerboard pattern. The output should ' +
-    'look like a green-screen chroma-key photo.';
+  // Karen 2026-04-07: v4 had striped chair backs and furniture leaking
+  // through. Old prompt said "keep the person, replace background" and
+  // Gemini interpreted the chair as "part of the person" because they
+  // were touching it. New prompt is much more aggressive: explicitly
+  // list every furniture/wall/touching surface, and tell Gemini the
+  // result should look like the person is "floating in a green void".
+  const greenScreenPrompt = `Replace EVERYTHING in this image except the person's body and clothing with pure solid green (#00FF00).
+
+KEEP only:
+- The person's head, hair, face
+- The person's torso, arms, hands
+- The person's clothing (sweater, shirt)
+
+REPLACE WITH PURE GREEN (#00FF00):
+- Walls, floors, ceiling
+- Furniture, chairs, chair backs, chair arms, sofa, desk
+- Background objects, decorations
+- ANYTHING the person is touching or sitting on
+- Any reflections, shadows on walls
+- ALL striped patterns, ALL textured surfaces
+- The chair the person sits on (replace it entirely with green)
+
+The result should look like the person is floating in a void of solid green.
+Nothing else should be visible — no chair, no wall, no shadow on floor.
+
+DO NOT keep furniture even if it touches the person.
+DO NOT keep background patterns or textures.
+DO NOT use checkerboard.
+
+Output only the image.`;
 
   const greenB64 = await callGeminiImage(greenScreenPrompt, personFrameBase64, 0.1);
   const greenBuffer = Buffer.from(greenB64, 'base64');
