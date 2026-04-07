@@ -609,59 +609,134 @@ async function callGeminiImageMultiRef(
 /**
  * Determine person placement based on layout type.
  *
- * Karen 2026-04-07 (v14 follow-up): person is now ALWAYS bottom-anchored
- * and 65% height, leaving the top 35% for text. This eliminates the "hard
- * cut at the bottom" issue from v14 — bottom-aligned cutouts blend more
- * naturally because the slot bottom matches the canvas bottom and the
- * additional bottom fade gradient (compositeCandidate) softens any seam.
+ * Karen 2026-04-07 (影視颶風 study): looked at multiple LKs thumbnails —
+ * the person is ALWAYS half-cut by the canvas edge. The head/shoulders
+ * extend OUT OF the canvas top/sides, so the cutout never floats with
+ * a visible bottom seam. To match this:
+ *   - personWidth = 70% of canvas (896px) — chunky like LKs
+ *   - personHeight = 110% of canvas (792px) — over-fills the slot
+ *   - Anchor from one corner (bottom-left or bottom-right) so the
+ *     opposite top/side edge gets cropped by the canvas bound
+ *   - cover-fit + 'left top' or 'right top' makes the cover crop the
+ *     opposite edge cleanly
  *
- * Layout horizontal positions:
- *   - face_left_text_right  → person bottom-LEFT
- *   - face_right_text_left  → person bottom-RIGHT
- *   - face_center_text_top  → person bottom-CENTER
- *   - full_frame_overlay    → same as face_left_text_right (default)
+ * The person is then composited so part of them naturally extends
+ * past the canvas edges — exactly the LKs / 影視颶風 look.
  */
 function getPersonPlacement(layoutType: string): {
   personWidth: number;
   personHeight: number;
   personX: number;
   personY: number;
-  gradientDirection: 'left' | 'right' | 'both';
+  resizePosition: string;
 } {
-  const personWidth = Math.round(THUMBNAIL_WIDTH * 0.5);    // 640
-  const personHeight = Math.round(THUMBNAIL_HEIGHT * 0.65); // 468
-  const personY = THUMBNAIL_HEIGHT - personHeight;           // 252 (bottom-aligned)
+  // Person over-fills the slot — width is 70% of canvas, height is 110%
+  // so the cutout naturally extends past the canvas top.
+  const personWidth = Math.round(THUMBNAIL_WIDTH * 0.7);    // 896
+  const personHeight = Math.round(THUMBNAIL_HEIGHT * 1.1);  // 792
 
   switch (layoutType) {
     case 'face_left_text_right':
     case 'full_frame_overlay':
+      // Person bottom-LEFT corner. Top extends past canvas top.
       return {
         personWidth,
         personHeight,
-        personX: 0,                                           // bottom-left
-        personY,
-        gradientDirection: 'right',
+        personX: 0,
+        personY: THUMBNAIL_HEIGHT - personHeight, // negative — extends above
+        resizePosition: 'left top',
       };
 
     case 'face_center_text_top':
+      // Person bottom-CENTER, slightly narrower
       return {
-        personWidth,
+        personWidth: Math.round(THUMBNAIL_WIDTH * 0.6),
         personHeight,
-        personX: Math.round((THUMBNAIL_WIDTH - personWidth) / 2),
-        personY,
-        gradientDirection: 'both',
+        personX: Math.round((THUMBNAIL_WIDTH - THUMBNAIL_WIDTH * 0.6) / 2),
+        personY: THUMBNAIL_HEIGHT - personHeight,
+        resizePosition: 'top',
       };
 
     case 'face_right_text_left':
     default:
+      // Person bottom-RIGHT corner. Top extends past canvas top.
       return {
         personWidth,
         personHeight,
-        personX: THUMBNAIL_WIDTH - personWidth,               // bottom-right
-        personY,
-        gradientDirection: 'left',
+        personX: THUMBNAIL_WIDTH - personWidth,
+        personY: THUMBNAIL_HEIGHT - personHeight,
+        resizePosition: 'right top',
       };
   }
+}
+
+/**
+ * Add a white outline (stroke) around the person cutout.
+ * Karen 2026-04-07 v20 feedback: liked the white stroke around the
+ * person from a previous version. Implements via alpha dilation:
+ *   1. Read raw alpha
+ *   2. Compute a dilated alpha mask (any pixel within `width` of an
+ *      opaque pixel becomes opaque)
+ *   3. Build a white image with the dilated mask as its alpha
+ *   4. Composite original cutout on top of white-with-dilated-alpha
+ */
+async function addWhiteStroke(cutoutPng: Buffer, strokeWidth = 8): Promise<Buffer> {
+  const { data, info } = await sharp(cutoutPng)
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const w = info.width;
+  const h = info.height;
+  const total = w * h;
+
+  // Build dilated alpha: pixel becomes opaque if any pixel within
+  // `strokeWidth` (Manhattan distance) is opaque. Use two-pass distance
+  // transform approximation: scan rows then cols.
+  const dilatedAlpha = new Uint8Array(total);
+  for (let i = 0; i < total; i++) {
+    dilatedAlpha[i] = data[i * 4 + 3] > 0 ? 255 : 0;
+  }
+  // Box dilation: for each opaque pixel mark neighbors within strokeWidth
+  // Simple approach: iterate strokeWidth times, each iteration marks
+  // neighbors of currently-opaque pixels.
+  const next = new Uint8Array(total);
+  for (let iter = 0; iter < strokeWidth; iter++) {
+    next.set(dilatedAlpha);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (dilatedAlpha[i] === 255) continue;
+        // Check 4 neighbors
+        if ((x > 0 && dilatedAlpha[i - 1] === 255) ||
+            (x < w - 1 && dilatedAlpha[i + 1] === 255) ||
+            (y > 0 && dilatedAlpha[i - w] === 255) ||
+            (y < h - 1 && dilatedAlpha[i + w] === 255)) {
+          next[i] = 255;
+        }
+      }
+    }
+    dilatedAlpha.set(next);
+  }
+
+  // Build a white RGBA layer with the dilated alpha
+  const whiteLayer = Buffer.alloc(total * 4);
+  for (let i = 0; i < total; i++) {
+    whiteLayer[i * 4]     = 255;
+    whiteLayer[i * 4 + 1] = 255;
+    whiteLayer[i * 4 + 2] = 255;
+    whiteLayer[i * 4 + 3] = dilatedAlpha[i];
+  }
+
+  const whiteLayerPng = await sharp(whiteLayer, { raw: { width: w, height: h, channels: 4 } })
+    .png()
+    .toBuffer();
+
+  // Composite original cutout on top of white layer → person with stroke
+  return sharp(whiteLayerPng)
+    .composite([{ input: cutoutPng, top: 0, left: 0, blend: 'over' }])
+    .png()
+    .toBuffer();
 }
 
 /**
@@ -851,13 +926,10 @@ function selectBestFrame(frames: string[]): string {
 /**
  * Composite a pre-cut-out person (PNG with alpha) onto the design background.
  *
- * Karen 2026-04-07: full quality pipeline:
- *  1. Sharp.trim() — strip transparent margins so the cutout bbox is tight
- *     around the actual person (no floating-head effect from top alignment)
- *  2. Sanity check — if trimmed cutout is too short (chroma key cropped the
- *     torso), fall back to fit:'contain' on the original cutout so the
- *     person stays whole even at smaller size
- *  3. fit:'cover' + position:'top' fills the slot with the head dominant
+ * Karen 2026-04-07 (v21): match LKs / 影視颶風 layout — person extends
+ * past the canvas edges so part of them is naturally cropped by the canvas
+ * bound. No floating, no fade, no seam. Plus a white outline (Karen liked
+ * the stroke from a previous version).
  */
 async function compositeCandidate(
   designBackground: Buffer,
@@ -866,55 +938,40 @@ async function compositeCandidate(
 ): Promise<Buffer> {
   const placement = getPersonPlacement(layoutType);
 
-  // Step 1: trim transparent margins. Sharp's trim() with a transparent
-  // background reads the alpha channel and crops to the non-transparent
-  // bounding box. This converts a 1920×1080 cutout with mostly transparent
-  // top/bottom into a tight box around the actual person.
+  // Trim transparent margins so the cutout bbox is tight on the person
   let trimmedCutout: Buffer;
-  let trimmedMeta: { width?: number; height?: number };
   try {
     trimmedCutout = await sharp(personCutoutPng)
       .trim({ background: { r: 0, g: 0, b: 0, alpha: 0 }, threshold: 1 })
       .png()
       .toBuffer();
-    trimmedMeta = await sharp(trimmedCutout).metadata();
   } catch {
-    // trim failed (no alpha or fully opaque) — use original
     trimmedCutout = personCutoutPng;
-    trimmedMeta = await sharp(personCutoutPng).metadata();
   }
 
-  const tw = trimmedMeta.width || 1;
-  const th = trimmedMeta.height || 1;
-  const trimmedAspect = tw / th;
-  const slotAspect = placement.personWidth / placement.personHeight;
-
-  // Q2 sanity check: if the trimmed cutout aspect is wildly off (e.g. very
-  // wide and short → just a head with no torso, or chroma key ate the body),
-  // we still want to fit it without distortion. Sharp 'cover' will crop to
-  // match slot aspect; if the cutout is "head-only" (height < 30% of width)
-  // we use 'contain' so we don't double-zoom into just the head.
-  const isHeadOnly = th < tw * 0.6;  // heuristic: torso would make it taller
-
-  const personResizedRaw = await sharp(trimmedCutout)
+  // Resize to over-fill the slot. Cover-fit + position keeps the head/face
+  // in view while letting hair/shoulders extend past the canvas if needed.
+  const personResized = await sharp(trimmedCutout)
     .resize(placement.personWidth, placement.personHeight, {
-      fit: isHeadOnly ? 'contain' : 'cover',
-      position: 'top',
+      fit: 'cover',
+      position: placement.resizePosition,
       background: { r: 0, g: 0, b: 0, alpha: 0 },
     })
     .png()
     .toBuffer();
 
-  // Karen 2026-04-07 v14 follow-up: cutout had a hard bottom seam where
-  // the clothing was cut. Apply a vertical bottom-fade gradient to blend
-  // the bottom 25% into the background.
-  const personResized = await applyBottomFade(personResizedRaw, 0.25);
+  // Karen 2026-04-07 v20 feedback: liked the white outline from previous
+  // versions. Add a thick white stroke around the person silhouette.
+  const personWithStroke = await addWhiteStroke(personResized, 6);
 
-  console.log(`[Thumbnail Generator] composite layout=${layoutType} trimmed=${tw}×${th} aspect=${trimmedAspect.toFixed(2)} slotAspect=${slotAspect.toFixed(2)} mode=${isHeadOnly ? 'contain' : 'cover'} bottomFade=0.25`);
+  console.log(`[Thumbnail Generator] composite layout=${layoutType} slot=${placement.personWidth}×${placement.personHeight} pos=(${placement.personX},${placement.personY}) resize=${placement.resizePosition}`);
 
+  // Composite at the placement coordinates. personY may be negative
+  // (cutout extends above canvas top). Sharp's composite supports this
+  // and will crop the input where it extends past the canvas bounds.
   return sharp(designBackground)
     .composite([{
-      input: personResized,
+      input: personWithStroke,
       left: placement.personX,
       top: placement.personY,
       blend: 'over',
