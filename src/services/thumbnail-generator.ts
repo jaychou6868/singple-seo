@@ -976,15 +976,29 @@ export async function generateThumbnails(params: {
         generateDesignBackground(ref, texts[i], title, i)
       ),
     ),
-    // Run background removal in parallel with design generation
-    removeBackgroundFromFrame(bestFrame).catch((err) => {
-      console.error(`[Thumbnail Generator] Background removal failed, falling back to raw frame:`, err);
-      return null;
-    }),
+    // Run background removal in parallel with design generation.
+    // Karen 2026-04-07: retry imgly up to 2 times. If it still fails,
+    // throw — we never want to show the raw frame as a "cutout" because
+    // it produces visible米色方框 in the final composite. Better to fail
+    // the whole generation than ship that.
+    (async () => {
+      let lastErr: unknown;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          return await removeBackgroundFromFrame(bestFrame);
+        } catch (err) {
+          lastErr = err;
+          console.warn(`[Thumbnail Generator] imgly removal attempt ${attempt + 1} failed:`, err);
+          await new Promise(r => setTimeout(r, 500));
+        }
+      }
+      throw lastErr;
+    })(),
   ]);
 
-  // Fallback: if background removal failed, use raw frame as opaque PNG
-  const personCutoutRaw = personCutoutResult ?? await sharp(Buffer.from(bestFrame, 'base64')).png().toBuffer();
+  // No raw-frame fallback — if imgly failed 3x, the Promise.all rejected
+  // and we're never here. personCutoutResult is always a real cutout.
+  const personCutoutRaw = personCutoutResult;
 
   // Beautify: Gemini bbox + Sharp local blur on face skin only
   // (eyes/nose/mouth re-overlaid from original to stay sharp).
