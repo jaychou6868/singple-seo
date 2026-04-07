@@ -616,43 +616,42 @@ function getPersonPlacement(layoutType: string): {
   personY: number;
   resizePosition: string;
 } {
-  // Karen 2026-04-07 v25: 70% width covered the text. Reduced to 50% so
-  // text and person each get half the canvas. Height extends 30 px past
-  // canvas top so the head naturally crops to the canvas edge (no
-  // floating effect).
+  // Karen 2026-04-07 v26: removed over-extend. person exactly fills
+  // canvas height (720) and 50% width (640). Cover-fit + position 'top'
+  // pins head to canvas top with body extending down. No cropping math,
+  // no negative coordinates, no floating-head effect because the
+  // cutout's top edge IS the canvas top edge.
   const personWidth = Math.round(THUMBNAIL_WIDTH * 0.5);    // 640
-  const personHeight = THUMBNAIL_HEIGHT + 30;                // 750
+  const personHeight = THUMBNAIL_HEIGHT;                      // 720
 
   switch (layoutType) {
     case 'face_left_text_right':
     case 'full_frame_overlay':
-      // Person bottom-LEFT, head extends slightly above canvas
       return {
         personWidth,
         personHeight,
         personX: 0,
-        personY: THUMBNAIL_HEIGHT - personHeight, // -30
+        personY: 0,
         resizePosition: 'left top',
       };
 
     case 'face_center_text_top':
-      // Person bottom-CENTER (text on top), slightly narrower
+      // Slightly narrower so the text on top has clearance
       return {
         personWidth: Math.round(THUMBNAIL_WIDTH * 0.45),
         personHeight,
         personX: Math.round((THUMBNAIL_WIDTH - THUMBNAIL_WIDTH * 0.45) / 2),
-        personY: THUMBNAIL_HEIGHT - personHeight,
+        personY: 0,
         resizePosition: 'top',
       };
 
     case 'face_right_text_left':
     default:
-      // Person bottom-RIGHT, head extends slightly above canvas
       return {
         personWidth,
         personHeight,
         personX: THUMBNAIL_WIDTH - personWidth,
-        personY: THUMBNAIL_HEIGHT - personHeight,
+        personY: 0,
         resizePosition: 'right top',
       };
   }
@@ -887,10 +886,10 @@ function selectBestFrame(frames: string[]): string {
 /**
  * Composite a pre-cut-out person (PNG with alpha) onto the design background.
  *
- * Karen 2026-04-07 (v21): match LKs / 影視颶風 layout — person extends
- * past the canvas edges so part of them is naturally cropped by the canvas
- * bound. No floating, no fade, no seam. Plus a white outline (Karen liked
- * the stroke from a previous version).
+ * Karen 2026-04-07 v26 (POC verified): use contain-fit so the person is
+ * fully visible at native aspect ratio, then anchor to a canvas corner so
+ * one edge of the cutout sits flush against the canvas edge (no floating,
+ * no seam). Plus a white outline.
  */
 async function compositeCandidate(
   designBackground: Buffer,
@@ -910,42 +909,48 @@ async function compositeCandidate(
     trimmedCutout = personCutoutPng;
   }
 
-  // Resize to over-fill the slot. Cover-fit + position keeps the head/face
-  // in view while letting hair/shoulders extend past the canvas if needed.
-  const personResizedFull = await sharp(trimmedCutout)
+  // Contain-fit: person is fully visible at native aspect ratio. Sharp
+  // returns the actual content size (no padding) when fit='inside'.
+  const personResized = await sharp(trimmedCutout)
     .resize(placement.personWidth, placement.personHeight, {
-      fit: 'cover',
-      position: placement.resizePosition,
-      background: { r: 0, g: 0, b: 0, alpha: 0 },
+      fit: 'inside',
+      withoutEnlargement: false,
     })
     .png()
     .toBuffer();
 
-  // Sharp.composite doesn't accept negative top/left. Compute the
-  // visible region of the resized cutout that intersects the canvas
-  // and extract only that portion.
-  const cropLeft = Math.max(0, -placement.personX);
-  const cropTop = Math.max(0, -placement.personY);
-  const cropRight = Math.min(placement.personWidth, THUMBNAIL_WIDTH - placement.personX);
-  const cropBottom = Math.min(placement.personHeight, THUMBNAIL_HEIGHT - placement.personY);
-  const cropWidth = cropRight - cropLeft;
-  const cropHeight = cropBottom - cropTop;
+  const resizedMeta = await sharp(personResized).metadata();
+  const rw = resizedMeta.width || placement.personWidth;
+  const rh = resizedMeta.height || placement.personHeight;
 
-  const personVisible = (cropLeft > 0 || cropTop > 0 || cropWidth < placement.personWidth || cropHeight < placement.personHeight)
-    ? await sharp(personResizedFull)
-        .extract({ left: cropLeft, top: cropTop, width: cropWidth, height: cropHeight })
-        .png()
-        .toBuffer()
-    : personResizedFull;
+  // Anchor the resized cutout to one of the canvas corners. This keeps
+  // one edge of the cutout flush against the canvas edge → no seam.
+  let finalLeft: number;
+  let finalTop: number;
+  switch (layoutType) {
+    case 'face_left_text_right':
+    case 'full_frame_overlay':
+      // Bottom-LEFT: cutout's left + bottom edges flush against canvas
+      finalLeft = 0;
+      finalTop = THUMBNAIL_HEIGHT - rh;
+      break;
+    case 'face_center_text_top':
+      // Bottom-CENTER: cutout's bottom edge flush, horizontally centered
+      finalLeft = Math.round((THUMBNAIL_WIDTH - rw) / 2);
+      finalTop = THUMBNAIL_HEIGHT - rh;
+      break;
+    case 'face_right_text_left':
+    default:
+      // Bottom-RIGHT: cutout's right + bottom edges flush against canvas
+      finalLeft = THUMBNAIL_WIDTH - rw;
+      finalTop = THUMBNAIL_HEIGHT - rh;
+      break;
+  }
 
-  const finalLeft = Math.max(0, placement.personX);
-  const finalTop = Math.max(0, placement.personY);
+  // Karen 2026-04-07 v20 feedback: liked the white outline.
+  const personWithStroke = await addWhiteStroke(personResized, 6);
 
-  // Karen 2026-04-07 v20 feedback: liked the white outline from previous
-  // versions. Add a thick white stroke around the person silhouette.
-  const personWithStroke = await addWhiteStroke(personVisible, 6);
-
-  console.log(`[Thumbnail Generator] composite layout=${layoutType} slot=${placement.personWidth}×${placement.personHeight} pos=(${placement.personX},${placement.personY}) crop=${cropLeft},${cropTop},${cropWidth}×${cropHeight} final=(${finalLeft},${finalTop})`);
+  console.log(`[Thumbnail Generator] composite layout=${layoutType} slot=${placement.personWidth}×${placement.personHeight} resized=${rw}×${rh} placed=(${finalLeft},${finalTop})`);
 
   return sharp(designBackground)
     .composite([{
