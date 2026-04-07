@@ -1043,12 +1043,15 @@ export async function generateThumbnails(params: {
   // ── Step 4: Composite person + background ────────────────
   progress(65, 'thumbnail_composite', '合成人物與背景...');
 
+  const compositeErrors: string[] = [];
   for (let i = 0; i < CANDIDATE_COUNT; i++) {
     const designResult = designResults[i];
 
     if (designResult.status === 'rejected') {
-      console.error(`[Thumbnail Generator] Candidate #${i} design failed: ${designResult.reason}`);
-      continue; // Skip this candidate
+      const reason = designResult.reason instanceof Error ? designResult.reason.message : String(designResult.reason);
+      console.error(`[Thumbnail Generator] Candidate #${i} design failed: ${reason}`);
+      compositeErrors.push(`#${i} design: ${reason}`);
+      continue;
     }
 
     const designBackground = designResult.value;
@@ -1099,13 +1102,14 @@ export async function generateThumbnails(params: {
 
       console.log(`[Thumbnail Generator] Candidate #${i} complete: ${imageUrl} (id=${row?.id})`);
     } catch (err) {
-      console.error(`[Thumbnail Generator] Candidate #${i} composite/upload failed:`, err);
-      // Continue with remaining candidates
+      const msg = err instanceof Error ? `${err.message}\n${(err.stack || '').split('\n').slice(0, 5).join('\n')}` : String(err);
+      console.error(`[Thumbnail Generator] Candidate #${i} composite/upload failed:`, msg);
+      compositeErrors.push(`#${i} composite: ${msg}`);
     }
   }
 
   if (candidates.length === 0) {
-    throw new Error('All thumbnail candidates failed to generate');
+    throw new Error('All thumbnail candidates failed to generate. Errors:\n' + compositeErrors.join('\n---\n'));
   }
 
   progress(100, 'thumbnail_done', `完成！生成了 ${candidates.length} 個縮圖候選`);
