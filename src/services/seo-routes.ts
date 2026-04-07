@@ -392,10 +392,27 @@ seoRoutes.post('/thumbnail/generate', async (c) => {
       return c.json({ error: 'Missing jobId, frames, or title' }, 400);
     }
 
+    // Normalize frames: strip "data:image/jpeg;base64," prefix if present.
+    // The frontend uses canvas.toDataURL() which returns the full data URL,
+    // but Sharp's Buffer.from(x, 'base64') needs pure base64 — otherwise
+    // it decodes the prefix as garbage bytes and throws "Input buffer
+    // contains unsupported image format" inside Sharp.
+    // Karen 2026-04-07 main-site test caught this — first front-end run
+    // failed with that error while my curl tests using pre-stripped base64
+    // succeeded.
+    const normalizedFrames = (frames as string[]).map((f) => {
+      if (typeof f !== 'string') return f;
+      const commaIdx = f.indexOf(',');
+      if (f.startsWith('data:') && commaIdx > 0) {
+        return f.substring(commaIdx + 1);
+      }
+      return f;
+    });
+
     // Run thumbnail generation (async, returns when done)
     const result = await generateThumbnails({
       jobId,
-      frames,
+      frames: normalizedFrames,
       title,
       videoSummary: videoSummary || '',
       videoType: videoType || 'tutorial',
