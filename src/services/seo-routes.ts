@@ -87,6 +87,37 @@ export const seoRoutes = new Hono();
   }
 })();
 
+// ── Locked-channel learner self-waking cron (runs once on import) ─
+//
+// Zeabur has no native cron. Instead we check on every cold start
+// whether the learner ran > 30 days ago and trigger it in the background
+// if so. Because Zeabur services restart at least weekly (push, idle reset),
+// this approximates a monthly cron without external dependencies.
+
+(async () => {
+  try {
+    const { data } = await supabase
+      .from('learner_meta')
+      .select('last_run_at')
+      .eq('id', 'locked_channel_learner')
+      .maybeSingle();
+    const lastRun = data?.last_run_at ? new Date(data.last_run_at) : null;
+    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    if (!lastRun || lastRun.getTime() < thirtyDaysAgo) {
+      console.log(`[SEO] Locked learner auto-trigger: lastRun=${lastRun?.toISOString() ?? 'never'} (running in background)`);
+      // Don't await — let it run async, the run takes ~5-7 minutes
+      runLockedChannelLearner().catch(err => {
+        console.error('[SEO] Locked learner auto-trigger failed:', err);
+      });
+    } else {
+      const daysAgo = Math.round((Date.now() - lastRun.getTime()) / (24 * 60 * 60 * 1000));
+      console.log(`[SEO] Locked learner last ran ${daysAgo} days ago — skipping auto-trigger`);
+    }
+  } catch (err) {
+    console.error('[SEO] Locked learner auto-trigger check failed:', err);
+  }
+})();
+
 // ── Upload: Init (GCS signed URL) ──────────────────────────
 
 seoRoutes.post('/upload/init', async (c) => {
@@ -473,20 +504,36 @@ seoRoutes.post('/thumbnail/select', async (c) => {
 
   if (error) return c.json({ error: error.message }, 500);
 
-  // Boost the pattern weight for learning
-  if (data?.pattern_id) {
-    const { data: pattern } = await supabase.from('seo_thumbnail_patterns')
+  // Bump weight of every reference used by the chosen candidate.
+  // The new generator stores all 3 reference video_ids in
+  // reference_video_ids; the legacy pattern_id is also bumped for
+  // backward compat with old candidates.
+  const idsToBump = new Set<string>();
+  const referenceVideoIds: string[] = data?.reference_video_ids ?? [];
+  if (referenceVideoIds.length > 0) {
+    const { data: refs } = await supabase
+      .from('seo_thumbnail_patterns')
+      .select('id')
+      .in('video_id', referenceVideoIds);
+    for (const r of (refs ?? []) as { id: string }[]) idsToBump.add(r.id);
+  }
+  if (data?.pattern_id) idsToBump.add(data.pattern_id);
+
+  for (const id of idsToBump) {
+    const { data: pattern } = await supabase
+      .from('seo_thumbnail_patterns')
       .select('weight')
-      .eq('id', data.pattern_id)
-      .single();
+      .eq('id', id)
+      .maybeSingle();
     if (pattern) {
-      await supabase.from('seo_thumbnail_patterns')
+      await supabase
+        .from('seo_thumbnail_patterns')
         .update({ weight: Math.min((pattern.weight || 1) + 0.2, 3.0) })
-        .eq('id', data.pattern_id);
+        .eq('id', id);
     }
   }
 
-  return c.json({ ok: true });
+  return c.json({ ok: true, bumpedReferences: idsToBump.size });
 });
 
 // ── Viral Learner: Test save pipeline (bypass YouTube) ────

@@ -14,6 +14,7 @@
 
 import sharp from 'sharp';
 import { createClient } from '@supabase/supabase-js';
+import { beautifyFace } from './face-beautify.js';
 
 // ── Config ──────────────────────────────────────────────────
 
@@ -46,6 +47,7 @@ interface ReferencePattern {
 }
 
 interface ThumbnailCandidate {
+  id: string | undefined;        // seo_thumbnail_candidates.id (for select feedback)
   imageUrl: string;
   thumbnailText: string;
   patternId: string | null;
@@ -207,19 +209,45 @@ function parseJsonResponse(text: string): any {
 // ── Step 1: Select Patterns ────────────────────────────────
 
 /**
+ * Weighted random pick. Higher weight = higher probability. weight=0
+ * is treated as 0.1 to prevent total starvation of decayed references.
+ */
+function pickWeighted<T extends { weight?: number | null }>(items: T[]): T {
+  const weights = items.map(i => Math.max(i.weight ?? 1.0, 0.1));
+  const total = weights.reduce((a, b) => a + b, 0);
+  let r = Math.random() * total;
+  for (let i = 0; i < items.length; i++) {
+    r -= weights[i];
+    if (r <= 0) return items[i];
+  }
+  return items[items.length - 1];
+}
+
+function pickWeightedNoDup<T extends { id: string; weight?: number | null }>(
+  items: T[],
+  excludeIds: Set<string>,
+): T | null {
+  const remaining = items.filter(i => !excludeIds.has(i.id));
+  if (remaining.length === 0) return null;
+  return pickWeighted(remaining);
+}
+
+/**
  * Pick 3 references for a generation run.
  *
  * Strategy: prefer rows from the locked-channel learner (channel_source IN
  * ('mrbeast', 'lks')). When the learner has run, we mix 1 LKs + 1 MrBeast +
- * 1 random — this gives the generator a balanced few-shot signal across the
- * two reference channels. When the learner hasn't run yet (cold start), we
- * fall back to DEFAULT_PATTERNS which are text-only descriptors of the new
- * "real-scene confrontation" style.
+ * 1 random — using WEIGHTED random so references that Karen previously
+ * selected (via POST /thumbnail/select) get bumped weight and appear more
+ * often. References not used in 4 weeks have their weight decayed.
+ *
+ * Cold start (learner hasn't run): fall back to DEFAULT_PATTERNS which are
+ * text-only style descriptors.
  */
 async function selectReferences(): Promise<ReferencePattern[]> {
   const { data: lks } = await supabase
     .from('seo_thumbnail_patterns')
-    .select('id, channel_source, reference_image_b64, style_description, suggested_layout, video_id')
+    .select('id, channel_source, reference_image_b64, style_description, suggested_layout, video_id, weight')
     .eq('channel_source', 'lks')
     .not('reference_image_b64', 'is', null)
     .order('learned_at', { ascending: false })
@@ -227,14 +255,14 @@ async function selectReferences(): Promise<ReferencePattern[]> {
 
   const { data: mrbeast } = await supabase
     .from('seo_thumbnail_patterns')
-    .select('id, channel_source, reference_image_b64, style_description, suggested_layout, video_id')
+    .select('id, channel_source, reference_image_b64, style_description, suggested_layout, video_id, weight')
     .eq('channel_source', 'mrbeast')
     .not('reference_image_b64', 'is', null)
     .order('learned_at', { ascending: false })
     .limit(15);
 
-  const lksPool = (lks ?? []) as unknown as ReferencePattern[];
-  const mrbeastPool = (mrbeast ?? []) as unknown as ReferencePattern[];
+  const lksPool = (lks ?? []) as unknown as (ReferencePattern & { weight?: number })[];
+  const mrbeastPool = (mrbeast ?? []) as unknown as (ReferencePattern & { weight?: number })[];
   const combined = [...lksPool, ...mrbeastPool];
 
   // Cold-start: not enough learned references — fall back
@@ -243,14 +271,25 @@ async function selectReferences(): Promise<ReferencePattern[]> {
     return DEFAULT_PATTERNS;
   }
 
-  // Mix: 1 LKs + 1 MrBeast + 1 random from either
-  const pickRandom = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
+  // Mix: 1 LKs + 1 MrBeast + 1 random from either, all weighted by `weight`
+  const used = new Set<string>();
   const selected: ReferencePattern[] = [];
-  if (lksPool.length > 0) selected.push(pickRandom(lksPool));
-  if (mrbeastPool.length > 0) selected.push(pickRandom(mrbeastPool));
-  while (selected.length < CANDIDATE_COUNT) selected.push(pickRandom(combined));
+  if (lksPool.length > 0) {
+    const pick = pickWeightedNoDup(lksPool, used);
+    if (pick) { selected.push(pick); used.add(pick.id); }
+  }
+  if (mrbeastPool.length > 0) {
+    const pick = pickWeightedNoDup(mrbeastPool, used);
+    if (pick) { selected.push(pick); used.add(pick.id); }
+  }
+  while (selected.length < CANDIDATE_COUNT) {
+    const pick = pickWeightedNoDup(combined, used);
+    if (!pick) break;
+    selected.push(pick);
+    used.add(pick.id);
+  }
 
-  console.log(`[Thumbnail Generator] Selected references: ${selected.map(r => `${r.channel_source}:${r.video_id ?? r.id}`).join(', ')}`);
+  console.log(`[Thumbnail Generator] Selected references (weighted): ${selected.map(r => `${r.channel_source}:${r.video_id ?? r.id}(w=${(r as any).weight ?? 1})`).join(', ')}`);
   return selected.slice(0, CANDIDATE_COUNT);
 }
 
@@ -575,37 +614,6 @@ async function removeBackgroundFromFrame(personFrameBase64: string): Promise<Buf
 }
 
 /**
- * Sharp-only beautify — POC-B (2026-04-07) confirmed Gemini "subtle"
- * beautify still alters facial expression and identity. Karen explicitly
- * chose option A: Sharp-only, never touch the face shape.
- *
- * What this does (subtle level):
- * - Slight brightness lift (+3%)
- * - Slight saturation boost (+5%) for warmer skin tone
- * - Light unsharp mask for crisper eyes/edges
- * - No blur, no smoothing, no acne removal — those would soften features
- *
- * What this CANNOT do: remove acne, even out skin tone. That requires
- * pixel-level understanding which Sharp doesn't have. A future PR can
- * add OpenCV face landmarks + masked blur if Karen wants real去痘.
- */
-async function beautifyPersonFrameSharp(
-  cutoutPng: Buffer,
-  level: 'off' | 'subtle' = 'subtle',
-): Promise<Buffer> {
-  if (level === 'off') return cutoutPng;
-
-  return sharp(cutoutPng)
-    .modulate({
-      brightness: 1.03,
-      saturation: 1.05,
-    })
-    .sharpen({ sigma: 0.6, m1: 0.5, m2: 2.0 })
-    .png()
-    .toBuffer();
-}
-
-/**
  * Select the best frame from the provided frames array.
  * Picks the frame closest to 1/3 into the video (often a good representative frame).
  */
@@ -733,9 +741,11 @@ export async function generateThumbnails(params: {
   // Fallback: if background removal failed, use raw frame as opaque PNG
   const personCutoutRaw = personCutoutResult ?? await sharp(Buffer.from(bestFrame, 'base64')).png().toBuffer();
 
-  // Apply Sharp-only beautify (POC-B confirmed Gemini beautify changes
-  // facial expression — that's unacceptable for Karen's viral hook frames)
-  const personCutoutPng = await beautifyPersonFrameSharp(personCutoutRaw, 'subtle');
+  // Beautify: Gemini bbox + Sharp local blur on face skin only
+  // (eyes/nose/mouth re-overlaid from original to stay sharp).
+  // POC verified this preserves identity + expression while smoothing skin.
+  // If Gemini bbox call fails, beautifyFace returns the input unchanged.
+  const personCutoutPng = await beautifyFace(personCutoutRaw, 'subtle');
   console.log(`[Thumbnail Generator] Person cutout ready (${personCutoutResult ? 'bg removed' : 'raw fallback'}, beautify=subtle)`);
 
   // ── Step 4: Composite person + background ────────────────
@@ -763,16 +773,39 @@ export async function generateThumbnails(params: {
       progress(75 + (i * 7), 'thumbnail_upload', `上傳候選 ${i + 1}/${CANDIDATE_COUNT}...`);
       const imageUrl = await uploadCandidate(jobId, i, composited);
 
+      const referenceVideoIds = references
+        .map((r) => r.video_id)
+        .filter((v): v is string => v !== null);
+
+      // INSERT to seo_thumbnail_candidates so the select endpoint can
+      // bump weights of all 3 references when Karen picks this candidate.
+      // Without this row the select feedback loop is dead code.
+      const { data: row, error: insErr } = await supabase
+        .from('seo_thumbnail_candidates')
+        .insert({
+          job_id: jobId,
+          image_url: imageUrl,
+          layout_type: references[i].suggested_layout,
+          thumbnail_text: texts[i],
+          pattern_id: references[i].id,
+          reference_video_ids: referenceVideoIds,
+        })
+        .select('id')
+        .single();
+
+      if (insErr) {
+        console.error(`[Thumbnail Generator] Insert candidate #${i} failed:`, insErr);
+      }
+
       candidates.push({
+        id: row?.id,
         imageUrl,
         thumbnailText: texts[i],
         patternId: references[i].id,
-        referenceVideoIds: references
-          .map((r) => r.video_id)
-          .filter((v): v is string => v !== null),
+        referenceVideoIds,
       });
 
-      console.log(`[Thumbnail Generator] Candidate #${i} complete: ${imageUrl}`);
+      console.log(`[Thumbnail Generator] Candidate #${i} complete: ${imageUrl} (id=${row?.id})`);
     } catch (err) {
       console.error(`[Thumbnail Generator] Candidate #${i} composite/upload failed:`, err);
       // Continue with remaining candidates

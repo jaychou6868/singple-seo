@@ -348,6 +348,32 @@ export async function runLockedChannelLearner(): Promise<{
     }
   }
 
+  // 4. Weight decay — references not used in 4 weeks lose 0.2 weight
+  //    (floored at 0.1 so they're never fully starved). This complements
+  //    the bump-on-select in /thumbnail/select.
+  const fourWeeksAgo = new Date(Date.now() - 28 * 24 * 60 * 60 * 1000).toISOString();
+  const { data: stale } = await supabase
+    .from('seo_thumbnail_patterns')
+    .select('id, weight')
+    .lt('learned_at', fourWeeksAgo)
+    .not('channel_source', 'is', null);
+
+  let decayed = 0;
+  for (const row of (stale ?? []) as { id: string; weight: number | null }[]) {
+    const newWeight = Math.max((row.weight ?? 1.0) - 0.2, 0.1);
+    const { error: decayErr } = await supabase
+      .from('seo_thumbnail_patterns')
+      .update({ weight: newWeight })
+      .eq('id', row.id);
+    if (!decayErr) decayed++;
+  }
+
+  // 5. Update learner_meta so self-waking cron knows when we last ran
+  await supabase.from('learner_meta').update({
+    last_run_at: new Date().toISOString(),
+    last_run_summary: { channelsScanned: LOCKED_CHANNELS.length, stored, errors: errors.length, decayed },
+  }).eq('id', 'locked_channel_learner');
+
   const result = {
     channelsScanned: LOCKED_CHANNELS.length,
     videosFetched: allVideos.length,
@@ -355,6 +381,7 @@ export async function runLockedChannelLearner(): Promise<{
     analyzed: analyzedCount,
     filteredNoPerson,
     stored,
+    decayed,
     errors,
   };
   console.log('[Locked Learner] Done:', { ...result, errors: `${errors.length} errors` });
