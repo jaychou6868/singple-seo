@@ -722,7 +722,7 @@ function buildTextOverlaySvg(text: string, layoutType: string): Buffer {
     <style>
       ${fontFaceCss}
       .t {
-        font-family: 'NotoTC', "PingFang TC", "Source Han Sans TC", "Noto Sans CJK TC", sans-serif;
+        font-family: "Noto Sans CJK TC", "Noto Sans CJK SC", 'NotoTC', "PingFang TC", sans-serif;
         font-size: ${fontSize}px;
         font-weight: 900;
         fill: #ffffff;
