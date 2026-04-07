@@ -370,82 +370,46 @@ async function generateThumbnailTexts(
 
 function buildDesignPrompt(
   reference: ReferencePattern,
-  thumbnailText: string,
+  _thumbnailText: string,
   title: string,
-  layoutType: string,
+  _layoutType: string,
 ): string {
-  const layoutInstruction: Record<string, string> = {
-    face_left_text_right:
-      'Place the Chinese text on the RIGHT 55% of the canvas. Leave the LEFT 45% as a clean simple region (gradient or muted scene element) — a person will be composited there later.',
-    face_right_text_left:
-      'Place the Chinese text on the LEFT 55% of the canvas. Leave the RIGHT 45% as a clean simple region (gradient or muted scene element) — a person will be composited there later.',
-    face_center_text_top:
-      'Place the Chinese text at the TOP 30% of the canvas. Leave the CENTER and BOTTOM area as a clean simple region — a person will be composited there later.',
-    full_frame_overlay:
-      'Cover the canvas with a real-scene background. Place the Chinese text in the upper third with a strong dark gradient under the text for legibility.',
-  };
-  const layoutLine = layoutInstruction[layoutType] || layoutInstruction.face_right_text_left;
-
-  // Karen 2026-04-07 v14 follow-up: person is now bottom-anchored at
-  // 65% height. Text MUST go in the top area (above the person) so it
-  // doesn't get covered. Person sits in the bottom-left, bottom-right,
-  // or bottom-center depending on layout.
-  const textArea = 'the TOP 35% of the canvas (pixels 0-252 in y-axis), spanning the full width or aligned opposite to the person';
-
-  const personArea = layoutType === 'face_left_text_right' || layoutType === 'full_frame_overlay'
-    ? 'the BOTTOM-LEFT quadrant (x: 0-640, y: 252-720) — leave it as a clean simple region for the person photo'
-    : layoutType === 'face_center_text_top'
-      ? 'the BOTTOM-CENTER area (x: 320-960, y: 252-720) — leave it as a clean simple region'
-      : 'the BOTTOM-RIGHT quadrant (x: 640-1280, y: 252-720) — leave it as a clean simple region for the person photo';
-
+  // Karen 2026-04-07 v27: Gemini ignored every text-position prompt
+  // we wrote and rendered text across the full width every time. Stop
+  // asking Gemini to render text. Instead it generates a CLEAN background
+  // (no text, no people) and Sharp/SVG composites the text afterward
+  // with pixel-perfect placement.
   return `Generate a YouTube thumbnail BACKGROUND image at 1280x720 pixels (16:9).
 
 ## Style Reference
-Look at the reference thumbnail attached. Notice its visual language:
-- REAL photographic scenes or real objects (NOT illustrated/decorative graphics)
-- Massive bold sans-serif Chinese text with thick white outline
-- ONE clear focal point per image (not a busy collage)
+Look at the reference thumbnail attached. Match its visual language:
+- REAL photographic scene or real object (NOT illustrated/decorative)
+- ONE clear focal point per image
 - Strong contrast color palette
-- ZERO decorative graphics: no arrows, no sparkles, no emoji icons,
-  no music notes, no glow effects
 - Mood: confrontational, documentary, cinematic
 
 Style notes: "${reference.style_description}"
 
-## STRICT LAYOUT REQUIREMENTS
+## What to draw
+A real-scene background related to singing tutorials. Pick ONE scene
+element, not a collage:
+- A close-up of a studio microphone with warm lighting
+- A vocal recording booth with acoustic panels and dramatic light
+- Sheet music on a stand under a spotlight
+- A sound mixer console with backlit faders
+- A vintage radio in dramatic lighting
+- A pop filter and shock mount in close-up
 
-### Text area
-- Place the Chinese text "${thumbnailText}" in ${textArea}
-- The text MUST fit entirely within this area
-- DO NOT extend the text into the person area
-- Render in extra-bold sans-serif (Source Han Sans Heavy feel) with
-  thick WHITE outline. Massive size, readable at 168×94 px.
+Be CREATIVE — pick something different from the reference and from
+typical stock photos. Same documentary spirit, different scene.
 
-### Person area (DO NOT DRAW A PERSON HERE — leave it clean)
-- ${personArea}
-- A real person photo will be composited into this area later
-- Keep this area visually simple: gradient, soft scene element, or
-  muted background — NO text, NO graphics, NO drawn people
-
-### CRITICAL TEXT RULES
-- Render the text "${thumbnailText}" EXACTLY ONCE — do not duplicate it
-- Do not add subtitles, captions, or any other text anywhere
-- The 4 characters of the text must appear ONE TIME, not twice or more
-
-## Background scene
-- Real scene related to singing tutorials: microphone close-up, recording
-  studio with warm lights, vintage radio, sheet music in dramatic lighting,
-  vocal booth, sound mixer console, acoustic panels
-- Choose ONE scene element, not a collage
-- Be CREATIVE and DIFFERENT from the reference — same style, different scene
-
-## Color palette (be diverse)
-Choose ONE of these palettes (try to vary across attempts):
-- Deep blue (#1A237E) + warm cream/gold accents
-- Warm cream (#FFF8E1) + deep red (#B71C1C) accents
+## Color palette (vary across attempts)
+Pick ONE of these palettes (be diverse):
+- Deep blue + warm cream/gold accents
+- Warm cream + deep red accents
 - Dark teal + amber spotlight
-- Charcoal (#212121) + electric yellow (#FFD600) accents
-- Burgundy (#7B1FA2 wait — pick warm only) deep maroon + cream
+- Charcoal + electric yellow accents
+- Deep maroon + cream
 
 AVOID: purple, pink, neon, gradient pastels.
 
@@ -454,10 +418,10 @@ AVOID: purple, pink, neon, gradient pastels.
 
 ## ABSOLUTE RULES
 - DO NOT draw any people, faces, hands, body parts, or human figures
+- DO NOT add ANY text, characters, words, captions, or letters
 - DO NOT add decorative graphics (arrows, sparkles, emoji, music notes, glows)
 - DO NOT make it look like a stock illustration or advertisement banner
-- DO NOT duplicate the text — render it ONE TIME ONLY
-- The text and the person area must NEVER overlap
+- The image must be a clean photographic scene with NO text and NO people
 - Output only the image`;
 }
 
@@ -655,6 +619,98 @@ function getPersonPlacement(layoutType: string): {
         resizePosition: 'right top',
       };
   }
+}
+
+/**
+ * Render the thumbnail title as an SVG text overlay positioned in the
+ * half of the canvas opposite from the person. Pixel-perfect control
+ * (no Gemini randomness).
+ *
+ * Karen 2026-04-07 v27: Gemini rendered text across full width every
+ * time, so it always overlapped the person. Sharp/SVG renders the text
+ * exactly where we want it.
+ */
+function buildTextOverlaySvg(text: string, layoutType: string): Buffer {
+  const W = THUMBNAIL_WIDTH;
+  const H = THUMBNAIL_HEIGHT;
+
+  // Decide text area based on which side the person is on
+  let textCenterX: number;
+  let textWidth: number;
+  let textAlign: 'start' | 'middle' = 'middle';
+  if (layoutType === 'face_left_text_right') {
+    // Person on LEFT → text on RIGHT half
+    textCenterX = W * 0.75;        // 960 — center of right half
+    textWidth = W * 0.5 - 60;      // 580 px usable width (with padding)
+  } else if (layoutType === 'face_center_text_top') {
+    // Person centered → text on TOP
+    textCenterX = W / 2;
+    textWidth = W * 0.9;
+  } else {
+    // face_right_text_left or default → person on RIGHT, text on LEFT
+    textCenterX = W * 0.25;        // 320 — center of left half
+    textWidth = W * 0.5 - 60;
+  }
+
+  const chars = [...text];
+  const charCount = chars.length;
+
+  // For 2-4 characters: render in 2x2 grid for max readability at small sizes
+  // For 1 character: single huge centered
+  // For 3 chars: 2 top + 1 bottom centered
+  let lines: string[][];
+  if (charCount === 1) {
+    lines = [[chars[0]]];
+  } else if (charCount === 2) {
+    lines = [[chars[0], chars[1]]];
+  } else if (charCount === 3) {
+    lines = [[chars[0], chars[1]], [chars[2]]];
+  } else {
+    // 4 chars in 2x2
+    lines = [[chars[0], chars[1]], [chars[2], chars[3]]];
+  }
+
+  // Compute font size: text fills ~80% of textWidth, divided by max chars per line
+  const maxCharsPerLine = Math.max(...lines.map(l => l.length));
+  const fontSize = Math.min(220, Math.round((textWidth * 0.85) / maxCharsPerLine));
+  const lineHeight = Math.round(fontSize * 1.05);
+  const totalTextHeight = lines.length * lineHeight;
+  const startY = Math.round((H - totalTextHeight) / 2 + fontSize * 0.85);
+
+  const textElements: string[] = [];
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li];
+    const lineWidth = line.length * fontSize;
+    const lineStartX = Math.round(textCenterX - lineWidth / 2);
+    const y = startY + li * lineHeight;
+    for (let ci = 0; ci < line.length; ci++) {
+      const x = lineStartX + ci * fontSize;
+      textElements.push(`<text class="t" x="${x}" y="${y}">${escapeXml(line[ci])}</text>`);
+    }
+  }
+
+  const svg = `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .t {
+      font-family: "PingFang TC", "Source Han Sans TC", "Noto Sans CJK TC", "Heiti TC", sans-serif;
+      font-size: ${fontSize}px;
+      font-weight: 900;
+      fill: #ffffff;
+      stroke: #000000;
+      stroke-width: ${Math.round(fontSize * 0.08)};
+      paint-order: stroke fill;
+    }
+  </style>
+  ${textElements.join('\n  ')}
+</svg>`;
+
+  return Buffer.from(svg);
+}
+
+function escapeXml(s: string): string {
+  return s.replace(/[<>&'"]/g, c => ({
+    '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;'
+  } as Record<string, string>)[c]);
 }
 
 /**
@@ -895,6 +951,7 @@ async function compositeCandidate(
   designBackground: Buffer,
   personCutoutPng: Buffer,
   layoutType: string,
+  thumbnailText: string,
 ): Promise<Buffer> {
   const placement = getPersonPlacement(layoutType);
 
@@ -952,13 +1009,20 @@ async function compositeCandidate(
 
   console.log(`[Thumbnail Generator] composite layout=${layoutType} slot=${placement.personWidth}×${placement.personHeight} resized=${rw}×${rh} placed=(${finalLeft},${finalTop})`);
 
-  return sharp(designBackground)
+  // Composite person on background, then SVG text overlay on top
+  const withPerson = await sharp(designBackground)
     .composite([{
       input: personWithStroke,
       left: finalLeft,
       top: finalTop,
       blend: 'over',
     }])
+    .png()
+    .toBuffer();
+
+  const textSvg = buildTextOverlaySvg(thumbnailText, layoutType);
+  return sharp(withPerson)
+    .composite([{ input: textSvg, top: 0, left: 0 }])
     .jpeg({ quality: 92 })
     .toBuffer();
 }
@@ -1064,11 +1128,14 @@ export async function generateThumbnails(params: {
     const designBackground = designResult.value;
 
     try {
-      // Composite — use the reference's suggested_layout for placement
+      // Composite — use the reference's suggested_layout for placement.
+      // Pass the text so SVG text overlay renders on top with pixel-perfect
+      // placement (Gemini no longer renders text at all).
       const composited = await compositeCandidate(
         designBackground,
         personCutoutPng,
         references[i].suggested_layout || 'face_right_text_left',
+        texts[i],
       );
 
       // ── Step 5: Upload ──────────────────────────────────
