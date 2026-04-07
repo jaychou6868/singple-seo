@@ -102,8 +102,11 @@ export const seoRoutes = new Hono();
       .eq('id', 'locked_channel_learner')
       .maybeSingle();
     const lastRun = data?.last_run_at ? new Date(data.last_run_at) : null;
-    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
-    if (!lastRun || lastRun.getTime() < thirtyDaysAgo) {
+    // Karen 2026-04-07: bumped from 30 → 14 days. Two channels post 1-2
+    // videos a week each, so a 14-day refresh keeps the reference pool
+    // closer to current trends without burning Gemini quota.
+    const fourteenDaysAgo = Date.now() - 14 * 24 * 60 * 60 * 1000;
+    if (!lastRun || lastRun.getTime() < fourteenDaysAgo) {
       console.log(`[SEO] Locked learner auto-trigger: lastRun=${lastRun?.toISOString() ?? 'never'} (running in background)`);
       // Don't await — let it run async, the run takes ~5-7 minutes
       runLockedChannelLearner().catch(err => {

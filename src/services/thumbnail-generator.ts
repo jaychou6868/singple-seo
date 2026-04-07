@@ -385,42 +385,81 @@ function buildDesignPrompt(
   };
   const layoutLine = layoutInstruction[layoutType] || layoutInstruction.face_right_text_left;
 
+  // Karen 2026-04-07: strict 50/50 split. Person fills the right half
+  // (640px), text fills the left half (640px). Tell Gemini explicitly
+  // so it doesn't paint text across the full width.
+  const textArea = layoutType === 'face_left_text_right'
+    ? 'the RIGHT 50% of the canvas (pixels 640-1280)'
+    : layoutType === 'face_center_text_top'
+      ? 'the TOP 30% of the canvas, centered horizontally'
+      : 'the LEFT 50% of the canvas (pixels 0-640)';
+
+  const personArea = layoutType === 'face_left_text_right'
+    ? 'the LEFT 50% (pixels 0-640) — leave it as a clean simple region'
+    : layoutType === 'face_center_text_top'
+      ? 'the BOTTOM 70% center area — leave it as a clean simple region'
+      : 'the RIGHT 50% (pixels 640-1280) — leave it as a clean simple region';
+
   return `Generate a YouTube thumbnail BACKGROUND image at 1280x720 pixels (16:9).
 
 ## Style Reference
-Look carefully at the 3 reference thumbnails attached. Notice their visual language:
+Look at the reference thumbnail attached. Notice its visual language:
 - REAL photographic scenes or real objects (NOT illustrated/decorative graphics)
 - Massive bold sans-serif Chinese text with thick white outline
 - ONE clear focal point per image (not a busy collage)
-- Strong contrast color palette (warm vs cool, bright vs dark)
+- Strong contrast color palette
 - ZERO decorative graphics: no arrows, no sparkles, no emoji icons,
-  no music notes, no glow effects, no "soundwave" patterns
-- Mood: confrontational, documentary, cinematic — like a real captured moment
+  no music notes, no glow effects
+- Mood: confrontational, documentary, cinematic
 
-Style notes from one reference: "${reference.style_description}"
+Style notes: "${reference.style_description}"
 
-## This Thumbnail's Requirements
-- Layout: ${layoutLine}
-- Text overlay: "${thumbnailText}" — render this Chinese text MASSIVE, in
-  extra-bold sans-serif (Source Han Sans Heavy weight feel), with thick
-  WHITE outline. The text must be readable even when the image is shrunk
-  to 168×94 pixels (mobile thumbnail size).
-- Color palette: deep blue + warm cream/gold OR warm cream + deep red.
-  Avoid purple, pink, neon, gradient pastels.
-- Background must be a REAL SCENE related to singing tutorials — for
-  example: a microphone close-up, a recording studio with warm lights,
-  a vintage radio, sheet music in dramatic lighting, a vocal booth.
-  Choose ONE scene element, not a collage.
+## STRICT LAYOUT REQUIREMENTS
+
+### Text area
+- Place the Chinese text "${thumbnailText}" in ${textArea}
+- The text MUST fit entirely within this area
+- DO NOT extend the text into the person area
+- Render in extra-bold sans-serif (Source Han Sans Heavy feel) with
+  thick WHITE outline. Massive size, readable at 168×94 px.
+
+### Person area (DO NOT DRAW A PERSON HERE — leave it clean)
+- ${personArea}
+- A real person photo will be composited into this area later
+- Keep this area visually simple: gradient, soft scene element, or
+  muted background — NO text, NO graphics, NO drawn people
+
+### CRITICAL TEXT RULES
+- Render the text "${thumbnailText}" EXACTLY ONCE — do not duplicate it
+- Do not add subtitles, captions, or any other text anywhere
+- The 4 characters of the text must appear ONE TIME, not twice or more
+
+## Background scene
+- Real scene related to singing tutorials: microphone close-up, recording
+  studio with warm lights, vintage radio, sheet music in dramatic lighting,
+  vocal booth, sound mixer console, acoustic panels
+- Choose ONE scene element, not a collage
+- Be CREATIVE and DIFFERENT from the reference — same style, different scene
+
+## Color palette (be diverse)
+Choose ONE of these palettes (try to vary across attempts):
+- Deep blue (#1A237E) + warm cream/gold accents
+- Warm cream (#FFF8E1) + deep red (#B71C1C) accents
+- Dark teal + amber spotlight
+- Charcoal (#212121) + electric yellow (#FFD600) accents
+- Burgundy (#7B1FA2 wait — pick warm only) deep maroon + cream
+
+AVOID: purple, pink, neon, gradient pastels.
 
 ## Video Context
-"${title}" — a singing tutorial video for the 簡單歌唱 Singple. channel.
+"${title}" — singing tutorial for 簡單歌唱 Singple. channel.
 
-## CRITICAL RULES
-- DO NOT draw any people, faces, hands, or human figures
-- DO NOT add any decorative graphics (arrows, sparkles, emoji, music notes, glows)
+## ABSOLUTE RULES
+- DO NOT draw any people, faces, hands, body parts, or human figures
+- DO NOT add decorative graphics (arrows, sparkles, emoji, music notes, glows)
 - DO NOT make it look like a stock illustration or advertisement banner
-- The result should look like a real photo with one bold text overlay,
-  in the documentary style of the reference thumbnails
+- DO NOT duplicate the text — render it ONE TIME ONLY
+- The text and the person area must NEVER overlap
 - Output only the image`;
 }
 
@@ -429,32 +468,30 @@ async function generateDesignBackground(
   thumbnailText: string,
   title: string,
   candidateIndex: number,
-  fewShotReferences: ReferencePattern[],
 ): Promise<Buffer> {
   const layoutType = reference.suggested_layout || 'face_right_text_left';
   const prompt = buildDesignPrompt(reference, thumbnailText, title, layoutType);
 
-  // Collect inline image parts from references that have actual base64 data
-  // (cold-start defaults won't have any — Gemini will fall back to text-only)
-  const referenceImages = fewShotReferences
-    .filter((r) => r.reference_image_b64)
-    .map((r) => r.reference_image_b64 as string);
+  // Karen 2026-04-07: pass ONLY this candidate's own reference image
+  // (not all 3). Mixing 3 references averaged the styles → all candidates
+  // looked the same. Single reference + high temperature 0.95 produces
+  // distinctly different backgrounds across the 3 candidates.
+  const referenceImages = reference.reference_image_b64
+    ? [reference.reference_image_b64]
+    : [];
 
-  console.log(`[Thumbnail Generator] Generating background #${candidateIndex} (layout=${layoutType}, refs=${referenceImages.length})`);
+  console.log(`[Thumbnail Generator] Generating background #${candidateIndex} (layout=${layoutType}, ref=${reference.video_id || reference.id})`);
 
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      // Pass first reference image as the primary input to Gemini for
-      // image-to-image style transfer. callGeminiImage only accepts one
-      // input image, but the prompt text describes all 3 references.
-      // (If we want true 3-image few-shot, we'd extend callGeminiImage —
-      // POC-C verified the API accepts multiple inlineData parts, see the
-      // poc-c-fewshot.mjs script for the multi-image variant.)
-      const base64Image = await callGeminiImageMultiRef(prompt, referenceImages, 0.7);
+      const base64Image = await callGeminiImageMultiRef(prompt, referenceImages, 0.95);
       const buffer = Buffer.from(base64Image, 'base64');
 
+      // Output dimension validation (Q4 quality gate): if Gemini returned
+      // a non-16:9 image, sharp.resize will cover-crop it which is fine.
+      // We don't reject — just normalize.
       const resized = await sharp(buffer)
         .resize(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT, { fit: 'cover' })
         .jpeg({ quality: 95 })
@@ -537,7 +574,7 @@ function getPersonPlacement(layoutType: string): {
   switch (layoutType) {
     case 'face_left_text_right':
       return {
-        personWidth: Math.round(THUMBNAIL_WIDTH * 0.55),    // 704
+        personWidth: Math.round(THUMBNAIL_WIDTH * 0.5),     // 640 — 50/50 split
         personHeight: THUMBNAIL_HEIGHT,                       // 720
         personX: 0,                                           // left edge
         personY: 0,
@@ -546,18 +583,18 @@ function getPersonPlacement(layoutType: string): {
 
     case 'face_center_text_top':
       return {
-        personWidth: Math.round(THUMBNAIL_WIDTH * 0.55),    // 704
+        personWidth: Math.round(THUMBNAIL_WIDTH * 0.5),     // 640
         personHeight: Math.round(THUMBNAIL_HEIGHT * 0.85),  // 612
-        personX: Math.round((THUMBNAIL_WIDTH - THUMBNAIL_WIDTH * 0.55) / 2),
+        personX: Math.round((THUMBNAIL_WIDTH - THUMBNAIL_WIDTH * 0.5) / 2),
         personY: THUMBNAIL_HEIGHT - Math.round(THUMBNAIL_HEIGHT * 0.85),
         gradientDirection: 'both',
       };
 
     case 'full_frame_overlay':
       return {
-        personWidth: Math.round(THUMBNAIL_WIDTH * 0.55),    // 704
+        personWidth: Math.round(THUMBNAIL_WIDTH * 0.5),     // 640
         personHeight: THUMBNAIL_HEIGHT,                       // 720
-        personX: Math.round(THUMBNAIL_WIDTH * 0.45),         // right side
+        personX: Math.round(THUMBNAIL_WIDTH * 0.5),          // right half
         personY: 0,
         gradientDirection: 'left',
       };
@@ -565,9 +602,9 @@ function getPersonPlacement(layoutType: string): {
     case 'face_right_text_left':
     default:
       return {
-        personWidth: Math.round(THUMBNAIL_WIDTH * 0.55),    // 704
+        personWidth: Math.round(THUMBNAIL_WIDTH * 0.5),     // 640
         personHeight: THUMBNAIL_HEIGHT,                       // 720
-        personX: Math.round(THUMBNAIL_WIDTH * 0.45),         // right side
+        personX: Math.round(THUMBNAIL_WIDTH * 0.5),          // right half
         personY: 0,
         gradientDirection: 'left',
       };
@@ -585,34 +622,31 @@ function getPersonPlacement(layoutType: string): {
  * literally draws a checkerboard pattern, which is unusable.
  */
 async function removeBackgroundFromFrame(personFrameBase64: string): Promise<Buffer> {
-  // Karen 2026-04-07: v4 had striped chair backs and furniture leaking
-  // through. Old prompt said "keep the person, replace background" and
-  // Gemini interpreted the chair as "part of the person" because they
-  // were touching it. New prompt is much more aggressive: explicitly
-  // list every furniture/wall/touching surface, and tell Gemini the
-  // result should look like the person is "floating in a green void".
-  const greenScreenPrompt = `Replace EVERYTHING in this image except the person's body and clothing with pure solid green (#00FF00).
+  // Karen 2026-04-07: balanced prompt. Earlier "replace EVERYTHING the
+  // person touches" version cropped torso/lap because the person sits
+  // on a chair → cutout had no lower body → composite showed only
+  // floating head and hand. New prompt keeps full upper body and only
+  // replaces background more than ~20 cm from the person.
+  const greenScreenPrompt = `Replace the background of this image with pure solid green (#00FF00).
 
-KEEP only:
+KEEP COMPLETELY VISIBLE (do not modify, do not crop):
 - The person's head, hair, face
-- The person's torso, arms, hands
-- The person's clothing (sweater, shirt)
+- The person's FULL UPPER BODY: shoulders, chest, torso, arms, hands
+- The person's clothing (entire sweater/shirt/jacket from collar to waist)
+- Anything within ~20 cm of the person's body silhouette
 
 REPLACE WITH PURE GREEN (#00FF00):
-- Walls, floors, ceiling
-- Furniture, chairs, chair backs, chair arms, sofa, desk
-- Background objects, decorations
-- ANYTHING the person is touching or sitting on
-- Any reflections, shadows on walls
-- ALL striped patterns, ALL textured surfaces
-- The chair the person sits on (replace it entirely with green)
+- The wall, ceiling, and floor of the room
+- Distant furniture (chairs further than ~30 cm from the person, tables, sofas, desks across the room)
+- Background patterns, textures, decorations
+- Anything more than ~30 cm away from the person
+- Striped chair backs, soundproofing panels, room props in the background
 
-The result should look like the person is floating in a void of solid green.
-Nothing else should be visible — no chair, no wall, no shadow on floor.
-
-DO NOT keep furniture even if it touches the person.
-DO NOT keep background patterns or textures.
-DO NOT use checkerboard.
+CRITICAL RULES:
+- DO NOT remove the person's clothing or torso. Keep their entire upper body intact.
+- DO NOT crop the person to just head and hand — preserve the full silhouette down to the waist.
+- DO NOT use a checkerboard pattern.
+- DO NOT make the person smaller or move them.
 
 Output only the image.`;
 
@@ -660,11 +694,13 @@ function selectBestFrame(frames: string[]): string {
 /**
  * Composite a pre-cut-out person (PNG with alpha) onto the design background.
  *
- * Karen 2026-04-07: switched from fit:'inside' (which made people tiny because
- * 16:9 cutouts were width-limited) to fit:'cover' with position:'top'. Cover
- * fills the entire slot, cropping the bottom of the cutout (clothing/waist)
- * so the head and shoulders stay at full size. This matches MrBeast/LKs
- * thumbnails where the head dominates the slot.
+ * Karen 2026-04-07: full quality pipeline:
+ *  1. Sharp.trim() — strip transparent margins so the cutout bbox is tight
+ *     around the actual person (no floating-head effect from top alignment)
+ *  2. Sanity check — if trimmed cutout is too short (chroma key cropped the
+ *     torso), fall back to fit:'contain' on the original cutout so the
+ *     person stays whole even at smaller size
+ *  3. fit:'cover' + position:'top' fills the slot with the head dominant
  */
 async function compositeCandidate(
   designBackground: Buffer,
@@ -673,15 +709,46 @@ async function compositeCandidate(
 ): Promise<Buffer> {
   const placement = getPersonPlacement(layoutType);
 
-  // fit:'cover' + position:'top' fills the slot, cropping clothing bottom
-  // first while keeping the head/face fully visible.
-  const personResized = await sharp(personCutoutPng)
+  // Step 1: trim transparent margins. Sharp's trim() with a transparent
+  // background reads the alpha channel and crops to the non-transparent
+  // bounding box. This converts a 1920×1080 cutout with mostly transparent
+  // top/bottom into a tight box around the actual person.
+  let trimmedCutout: Buffer;
+  let trimmedMeta: { width?: number; height?: number };
+  try {
+    trimmedCutout = await sharp(personCutoutPng)
+      .trim({ background: { r: 0, g: 0, b: 0, alpha: 0 }, threshold: 1 })
+      .png()
+      .toBuffer();
+    trimmedMeta = await sharp(trimmedCutout).metadata();
+  } catch {
+    // trim failed (no alpha or fully opaque) — use original
+    trimmedCutout = personCutoutPng;
+    trimmedMeta = await sharp(personCutoutPng).metadata();
+  }
+
+  const tw = trimmedMeta.width || 1;
+  const th = trimmedMeta.height || 1;
+  const trimmedAspect = tw / th;
+  const slotAspect = placement.personWidth / placement.personHeight;
+
+  // Q2 sanity check: if the trimmed cutout aspect is wildly off (e.g. very
+  // wide and short → just a head with no torso, or chroma key ate the body),
+  // we still want to fit it without distortion. Sharp 'cover' will crop to
+  // match slot aspect; if the cutout is "head-only" (height < 30% of width)
+  // we use 'contain' so we don't double-zoom into just the head.
+  const isHeadOnly = th < tw * 0.6;  // heuristic: torso would make it taller
+
+  const personResized = await sharp(trimmedCutout)
     .resize(placement.personWidth, placement.personHeight, {
-      fit: 'cover',
+      fit: isHeadOnly ? 'contain' : 'cover',
       position: 'top',
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
     })
     .png()
     .toBuffer();
+
+  console.log(`[Thumbnail Generator] composite layout=${layoutType} trimmed=${tw}×${th} aspect=${trimmedAspect.toFixed(2)} slotAspect=${slotAspect.toFixed(2)} mode=${isHeadOnly ? 'contain' : 'cover'}`);
 
   return sharp(designBackground)
     .composite([{
@@ -741,9 +808,10 @@ export async function generateThumbnails(params: {
   const [designResults, personCutoutResult] = await Promise.all([
     Promise.allSettled(
       references.map((ref, i) =>
-        // Each candidate sees ALL 3 references as few-shot context, but
-        // only one reference acts as the "primary" for layout selection
-        generateDesignBackground(ref, texts[i], title, i, references)
+        // Karen 2026-04-07: each candidate uses ONLY its own reference
+        // (not all 3). Diversity comes from different references +
+        // temperature 0.95.
+        generateDesignBackground(ref, texts[i], title, i)
       ),
     ),
     // Run background removal in parallel with design generation
