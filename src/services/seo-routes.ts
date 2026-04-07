@@ -466,6 +466,43 @@ seoRoutes.get('/thumbnail/test-timestamps/:jobId', async (c) => {
   return c.json({ ok: true, fileUri, timestamps, count: timestamps.length });
 });
 
+// ── Thumbnail: Debug imgly background removal ─────────────
+//
+// Karen 2026-04-07: imgly was returning the raw frame in production
+// (fallback path), meaning the lib silently throws on Zeabur. This
+// endpoint runs imgly directly on a tiny test image and returns the
+// error string so we can see what's wrong.
+
+seoRoutes.get('/thumbnail/debug-imgly', async (c) => {
+  try {
+    const { removeBackground } = await import('@imgly/background-removal-node');
+    // 1×1 red JPEG (smallest valid JPEG, so we don't ship test asset)
+    const tinyJpeg = Buffer.from(
+      '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAAAP/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AL+B/9k=',
+      'base64',
+    );
+    const t0 = Date.now();
+    const blob = await removeBackground(tinyJpeg, { model: 'medium' });
+    const elapsed = Date.now() - t0;
+    const buf = Buffer.from(await blob.arrayBuffer());
+    return c.json({
+      ok: true,
+      elapsed_ms: elapsed,
+      output_bytes: buf.length,
+      cwd: process.cwd(),
+    });
+  } catch (err) {
+    const e = err as any;
+    return c.json({
+      ok: false,
+      error: e?.message || String(err),
+      stack: (e?.stack || '').split('\n').slice(0, 10).join('\n'),
+      code: e?.code,
+      cwd: process.cwd(),
+    }, 500);
+  }
+});
+
 // ── Thumbnail: Manual learn from locked channels ──────────
 //
 // Triggers the locked-channel learner (MrBeast + 影視颶風) to refresh the
