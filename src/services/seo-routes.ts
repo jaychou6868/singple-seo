@@ -511,6 +511,45 @@ seoRoutes.get('/thumbnail/debug-imgly', async (c) => {
   }
 });
 
+// ── Thumbnail: Debug font load ────────────────────────────
+
+seoRoutes.get('/thumbnail/debug-font', async (c) => {
+  try {
+    const { default: fs } = await import('fs');
+    const { default: path } = await import('path');
+    const { fileURLToPath } = await import('url');
+
+    // Try multiple candidate paths from where this module lives at runtime
+    const here = fileURLToPath(import.meta.url);
+    const hereDir = path.dirname(here);
+    const candidates = [
+      path.resolve(hereDir, '../../assets/fonts/NotoSansTC-Black.ttf'),
+      path.resolve(process.cwd(), 'assets/fonts/NotoSansTC-Black.ttf'),
+      path.resolve(process.cwd(), 'dist/assets/fonts/NotoSansTC-Black.ttf'),
+      '/app/assets/fonts/NotoSansTC-Black.ttf',
+    ];
+
+    const results = candidates.map(p => {
+      try {
+        const stat = fs.statSync(p);
+        return { path: p, exists: true, size: stat.size };
+      } catch (err) {
+        return { path: p, exists: false, error: (err as any)?.code };
+      }
+    });
+
+    return c.json({
+      ok: true,
+      cwd: process.cwd(),
+      moduleLocation: here,
+      candidates: results,
+    });
+  } catch (err) {
+    const e = err as any;
+    return c.json({ ok: false, error: e?.message || String(err) }, 500);
+  }
+});
+
 // ── Thumbnail: Manual learn from locked channels ──────────
 //
 // Triggers the locked-channel learner (MrBeast + 影視颶風) to refresh the
