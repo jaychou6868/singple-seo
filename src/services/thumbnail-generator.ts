@@ -34,20 +34,22 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 // ── Types ───────────────────────────────────────────────────
 
-interface ThumbnailPattern {
+// ── Reference (learned from MrBeast + 影視颶風) ─────────────
+
+interface ReferencePattern {
   id: string;
-  layout_type: string;           // face_right_text_left, face_left_text_right, etc.
-  color_scheme: string;          // red, dark_blue, yellow_on_dark, etc.
-  text_style: string;            // bold_outline, shadow, plain_bold, gradient
-  emotional_hook: string;        // curiosity_gap, loss_aversion, fomo, etc.
-  weight: number;
-  [key: string]: unknown;
+  channel_source: 'mrbeast' | 'lks' | 'manual' | null;
+  reference_image_b64: string | null;       // base64 JPEG of the YouTube thumbnail
+  style_description: string;                 // Gemini's natural-language analysis
+  suggested_layout: string;                  // face_left_text_right, etc.
+  video_id: string | null;
 }
 
 interface ThumbnailCandidate {
   imageUrl: string;
   thumbnailText: string;
   patternId: string | null;
+  referenceVideoIds: string[];
 }
 
 interface ProgressCallback {
@@ -55,55 +57,44 @@ interface ProgressCallback {
 }
 
 // ── Cold Start Defaults ────────────────────────────────────
+//
+// Used when seo_thumbnail_patterns has fewer than 3 references with
+// non-null channel_source — i.e. the locked-channel learner hasn't
+// run yet. These describe the new "real-scene confrontation" style
+// in text only (no image), so the generator falls back to text-only
+// prompts. After the learner runs, references override these.
 
-const DEFAULT_PATTERNS: ThumbnailPattern[] = [
+const DEFAULT_PATTERNS: ReferencePattern[] = [
   {
     id: 'default_1',
-    layout_type: 'face_right_text_left',
-    color_scheme: 'red',
-    text_style: 'bold_outline',
-    emotional_hook: 'curiosity_gap',
-    weight: 1.0,
+    channel_source: null,
+    reference_image_b64: null,
+    style_description:
+      '主體為人物特寫加大字標題（左字右人或反之），背景是真實場景照片（不是合成插畫）。' +
+      '配色暖色對冷色強對比，字體粗黑無襯線加白邊。情緒張力來自表情與標題的反差。' +
+      '零裝飾元素 — 沒有箭頭、emoji、音符、光暈、漸層裝飾。',
+    suggested_layout: 'face_right_text_left',
+    video_id: null,
   },
   {
     id: 'default_2',
-    layout_type: 'face_left_text_right',
-    color_scheme: 'dark_blue',
-    text_style: 'shadow',
-    emotional_hook: 'loss_aversion',
-    weight: 1.0,
+    channel_source: null,
+    reference_image_b64: null,
+    style_description:
+      '人物在右、文字在左的對峙構圖。文字 2-3 個中文字加超粗白邊。' +
+      '背景是與主題相關的真實物件或場景近拍。整體像紀錄片截圖而非廣告版面。',
+    suggested_layout: 'face_right_text_left',
+    video_id: null,
   },
   {
     id: 'default_3',
-    layout_type: 'full_frame_overlay',
-    color_scheme: 'semi_transparent_black',
-    text_style: 'plain_bold',
-    emotional_hook: 'fomo',
-    weight: 1.0,
-  },
-  {
-    id: 'default_4',
-    layout_type: 'face_right_text_left',
-    color_scheme: 'yellow_on_dark',
-    text_style: 'bold_outline',
-    emotional_hook: 'transformation',
-    weight: 1.0,
-  },
-  {
-    id: 'default_5',
-    layout_type: 'face_center_text_top',
-    color_scheme: 'gradient_purple_blue',
-    text_style: 'gradient',
-    emotional_hook: 'authority',
-    weight: 1.0,
-  },
-  {
-    id: 'default_6',
-    layout_type: 'full_frame_overlay',
-    color_scheme: 'red_accent',
-    text_style: 'bold_outline',
-    emotional_hook: 'social_proof',
-    weight: 1.0,
+    channel_source: null,
+    reference_image_b64: null,
+    style_description:
+      '人物居中、大字疊在頂部的衝擊構圖。配色深底亮字（深藍/暖白 或 深紅/亮黃）。' +
+      '張力靠人物表情與賭注式短語（如「3 秒救嗓」「鎖喉真相」）製造。',
+    suggested_layout: 'face_center_text_top',
+    video_id: null,
   },
 ];
 
@@ -215,40 +206,51 @@ function parseJsonResponse(text: string): any {
 
 // ── Step 1: Select Patterns ────────────────────────────────
 
-async function selectPatterns(): Promise<ThumbnailPattern[]> {
-  const { data: patterns } = await supabase
+/**
+ * Pick 3 references for a generation run.
+ *
+ * Strategy: prefer rows from the locked-channel learner (channel_source IN
+ * ('mrbeast', 'lks')). When the learner has run, we mix 1 LKs + 1 MrBeast +
+ * 1 random — this gives the generator a balanced few-shot signal across the
+ * two reference channels. When the learner hasn't run yet (cold start), we
+ * fall back to DEFAULT_PATTERNS which are text-only descriptors of the new
+ * "real-scene confrontation" style.
+ */
+async function selectReferences(): Promise<ReferencePattern[]> {
+  const { data: lks } = await supabase
     .from('seo_thumbnail_patterns')
-    .select('*')
-    .order('weight', { ascending: false });
+    .select('id, channel_source, reference_image_b64, style_description, suggested_layout, video_id')
+    .eq('channel_source', 'lks')
+    .not('reference_image_b64', 'is', null)
+    .order('learned_at', { ascending: false })
+    .limit(15);
 
-  const pool = (patterns && patterns.length >= CANDIDATE_COUNT) ? patterns : DEFAULT_PATTERNS;
-  console.log(`[Thumbnail Generator] Pattern source: ${patterns && patterns.length >= CANDIDATE_COUNT ? 'knowledge base' : 'cold start defaults'} (${pool.length} available)`);
+  const { data: mrbeast } = await supabase
+    .from('seo_thumbnail_patterns')
+    .select('id, channel_source, reference_image_b64, style_description, suggested_layout, video_id')
+    .eq('channel_source', 'mrbeast')
+    .not('reference_image_b64', 'is', null)
+    .order('learned_at', { ascending: false })
+    .limit(15);
 
-  // Select 3 patterns with diverse layout_type
-  const selected: ThumbnailPattern[] = [];
-  const usedLayouts = new Set<string>();
-  const remaining = [...pool];
+  const lksPool = (lks ?? []) as unknown as ReferencePattern[];
+  const mrbeastPool = (mrbeast ?? []) as unknown as ReferencePattern[];
+  const combined = [...lksPool, ...mrbeastPool];
 
-  // First pass: pick one of each unique layout_type
-  for (const pattern of remaining) {
-    if (selected.length >= CANDIDATE_COUNT) break;
-    if (!usedLayouts.has(pattern.layout_type)) {
-      selected.push(pattern);
-      usedLayouts.add(pattern.layout_type);
-    }
+  // Cold-start: not enough learned references — fall back
+  if (combined.length < CANDIDATE_COUNT) {
+    console.log(`[Thumbnail Generator] Cold start: only ${combined.length} learned references, using DEFAULT_PATTERNS`);
+    return DEFAULT_PATTERNS;
   }
 
-  // Second pass: fill remaining slots with highest-weight unused patterns
-  if (selected.length < CANDIDATE_COUNT) {
-    const selectedIds = new Set(selected.map(s => s.id));
-    for (const pattern of remaining) {
-      if (selected.length >= CANDIDATE_COUNT) break;
-      if (!selectedIds.has(pattern.id)) {
-        selected.push(pattern);
-      }
-    }
-  }
+  // Mix: 1 LKs + 1 MrBeast + 1 random from either
+  const pickRandom = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.length)];
+  const selected: ReferencePattern[] = [];
+  if (lksPool.length > 0) selected.push(pickRandom(lksPool));
+  if (mrbeastPool.length > 0) selected.push(pickRandom(mrbeastPool));
+  while (selected.length < CANDIDATE_COUNT) selected.push(pickRandom(combined));
 
+  console.log(`[Thumbnail Generator] Selected references: ${selected.map(r => `${r.channel_source}:${r.video_id ?? r.id}`).join(', ')}`);
   return selected.slice(0, CANDIDATE_COUNT);
 }
 
@@ -259,20 +261,27 @@ async function generateThumbnailTexts(
   videoSummary: string,
   videoType: string,
 ): Promise<string[]> {
-  const systemPrompt = `你是 YouTube 縮圖文字專家。為「簡單歌唱 Singple.」的歌唱教學頻道設計縮圖上的短語。`;
+  const systemPrompt = `你是 YouTube 縮圖文字大師，專為「簡單歌唱 Singple.」這個歌唱教學頻道寫縮圖上的對峙式大字。風格參考影視颶風與 MrBeast — 短、有力、製造對峙感，但保留歌唱教學頻道該有的溫度（不要威脅式罵人）。`;
 
   const prompt = `## 任務
-生成 3 個 YouTube 縮圖短語。
+為這支歌唱教學影片生成 3 個縮圖大字短語，分屬三種句型。
 
-## 規則
-1. 每個短語 2-4 個中文字
-2. 必須在 168x94px（手機縮圖尺寸）下也能清楚辨識
-3. 不能語義重複 SEO 標題
-4. 包含情感衝擊詞
-5. 3 個短語分別用不同的情感策略：
-   - 第 1 個：好奇缺口（讓人想知道答案）
-   - 第 2 個：損失框架（不做會怎樣）
-   - 第 3 個：轉變/權威（暗示效果）
+## 鐵律
+1. **2-4 個中文字**（4 字是極限，多 1 字就 reject）
+2. 不能含贅字「的」「了」「之」「在」「是」
+3. 不能跟 SEO 標題重複用字
+4. **手機縮圖 168×94 px** 下要一秒讀懂
+
+## 三個句型（必須各出一個）
+
+### 句型 A：揭密型（暗示這影片揭露某個真相）
+範例：「鎖喉真相」「偷偷練的」「老師沒講」「真相曝光」
+
+### 句型 B：反差數字型（具體小數字 + 大效果）
+範例：「3 秒開嗓」「1 動作」「30 天」「秒變鐵肺」
+
+### 句型 C：痛點點名型（直接點出觀眾的具體痛點，不威脅）
+範例：「怕高音?」「鎖喉的人」「氣不夠?」「破音救星」
 
 ## 影片資訊
 - SEO 標題：${title}
@@ -280,97 +289,133 @@ async function generateThumbnailTexts(
 - 影片類型：${videoType}
 
 ## 輸出 JSON
-{"phrases": ["短語1", "短語2", "短語3"]}`;
+{"phrases": ["A 句型短語", "B 句型短語", "C 句型短語"]}
+
+只輸出 JSON。`;
 
   const raw = await callGeminiText(prompt, systemPrompt);
   const parsed = parseJsonResponse(raw);
 
   if (parsed?.phrases && Array.isArray(parsed.phrases) && parsed.phrases.length >= CANDIDATE_COUNT) {
-    return parsed.phrases.slice(0, CANDIDATE_COUNT);
+    // Hard-enforce the 2-4 char limit (Sally's mobile readability rule).
+    // Strip whitespace and reject overlong items.
+    const cleaned: string[] = parsed.phrases
+      .slice(0, CANDIDATE_COUNT)
+      .map((p: string) => p.trim())
+      .filter((p: string) => {
+        const len = [...p.replace(/\s/g, '')].length;
+        return len >= 2 && len <= 4;
+      });
+    if (cleaned.length === CANDIDATE_COUNT) return cleaned;
+    console.warn(`[Thumbnail Generator] Text length filter dropped to ${cleaned.length}/${CANDIDATE_COUNT}`);
+    const FALLBACK = ['鎖喉真相', '3 秒救嗓', '怕高音?'];
+    while (cleaned.length < CANDIDATE_COUNT) {
+      cleaned.push(FALLBACK[cleaned.length]);
+    }
+    return cleaned;
   }
 
   console.warn('[Thumbnail Generator] Text generation returned unexpected format, using fallbacks');
-  return ['必學秘技', '別再錯了', '聽完驚豔'];
+  return ['鎖喉真相', '3 秒救嗓', '怕高音?'];
 }
 
-// ── Step 3: Generate Design Backgrounds ────────────────────
+// ── Step 3: Generate Design Backgrounds (few-shot from references) ──
+//
+// New approach (verified by POC-C 2026-04-07):
+// - Pass 3 reference thumbnails (mixed MrBeast + LKs) as inline image parts
+//   to Gemini Nano Banana Pro, plus a text prompt that names the layout
+//   slot, the Chinese text overlay, and zero-decoration constraints.
+// - Gemini outputs a real-photographic-scene background, not stock-art.
+// - The reference's `style_description` gives Gemini extra context to mimic.
 
 function buildDesignPrompt(
-  pattern: ThumbnailPattern,
+  reference: ReferencePattern,
   thumbnailText: string,
   title: string,
+  layoutType: string,
 ): string {
-  const layoutDescriptions: Record<string, string> = {
-    face_right_text_left: 'Text and decorative elements on the LEFT 55% of the image. The RIGHT 45% should have a simpler, cleaner background (soft gradient or solid color) because a person will be composited there later.',
-    face_left_text_right: 'Text and decorative elements on the RIGHT 55% of the image. The LEFT 45% should have a simpler, cleaner background (soft gradient or solid color) because a person will be composited there later.',
-    face_center_text_top: 'Large text at the TOP 30% of the image. The CENTER and BOTTOM area should have a simpler background (gradient) because a person will be composited there later.',
-    full_frame_overlay: 'Full-frame design with text prominently placed. Use a semi-transparent overlay area where a person will be composited later — ensure the text remains readable alongside a person.',
+  const layoutInstruction: Record<string, string> = {
+    face_left_text_right:
+      'Place the Chinese text on the RIGHT 55% of the canvas. Leave the LEFT 45% as a clean simple region (gradient or muted scene element) — a person will be composited there later.',
+    face_right_text_left:
+      'Place the Chinese text on the LEFT 55% of the canvas. Leave the RIGHT 45% as a clean simple region (gradient or muted scene element) — a person will be composited there later.',
+    face_center_text_top:
+      'Place the Chinese text at the TOP 30% of the canvas. Leave the CENTER and BOTTOM area as a clean simple region — a person will be composited there later.',
+    full_frame_overlay:
+      'Cover the canvas with a real-scene background. Place the Chinese text in the upper third with a strong dark gradient under the text for legibility.',
   };
+  const layoutLine = layoutInstruction[layoutType] || layoutInstruction.face_right_text_left;
 
-  const layoutInstruction = layoutDescriptions[pattern.layout_type] || layoutDescriptions.face_right_text_left;
+  return `Generate a YouTube thumbnail BACKGROUND image at 1280x720 pixels (16:9).
 
-  const colorDescriptions: Record<string, string> = {
-    red: 'Bold red (#E53935) as dominant color with dark accents',
-    dark_blue: 'Deep navy blue (#1A237E) with bright accent highlights',
-    semi_transparent_black: 'Dark cinematic background with semi-transparent black overlay',
-    yellow_on_dark: 'Dark background (#1C1C1C) with vivid yellow (#FFD600) accent elements',
-    gradient_purple_blue: 'Gradient from deep purple (#6A1B9A) to electric blue (#1E88E5)',
-    red_accent: 'Dark background with bold red (#F44336) accent stripes or geometric shapes',
-  };
+## Style Reference
+Look carefully at the 3 reference thumbnails attached. Notice their visual language:
+- REAL photographic scenes or real objects (NOT illustrated/decorative graphics)
+- Massive bold sans-serif Chinese text with thick white outline
+- ONE clear focal point per image (not a busy collage)
+- Strong contrast color palette (warm vs cool, bright vs dark)
+- ZERO decorative graphics: no arrows, no sparkles, no emoji icons,
+  no music notes, no glow effects, no "soundwave" patterns
+- Mood: confrontational, documentary, cinematic — like a real captured moment
 
-  const colorInstruction = colorDescriptions[pattern.color_scheme] || colorDescriptions[pattern.color_scheme] || 'Vibrant, eye-catching colors appropriate for YouTube thumbnails';
+Style notes from one reference: "${reference.style_description}"
 
-  const textStyleDescriptions: Record<string, string> = {
-    bold_outline: 'Extra bold text with thick white or contrasting outline/stroke for maximum readability',
-    shadow: 'Bold text with strong drop shadow for depth',
-    plain_bold: 'Clean, ultra-bold sans-serif text without effects — relies on contrast with background',
-    gradient: 'Bold text with gradient fill (gold to white or matching the color scheme)',
-  };
+## This Thumbnail's Requirements
+- Layout: ${layoutLine}
+- Text overlay: "${thumbnailText}" — render this Chinese text MASSIVE, in
+  extra-bold sans-serif (Source Han Sans Heavy weight feel), with thick
+  WHITE outline. The text must be readable even when the image is shrunk
+  to 168×94 pixels (mobile thumbnail size).
+- Color palette: deep blue + warm cream/gold OR warm cream + deep red.
+  Avoid purple, pink, neon, gradient pastels.
+- Background must be a REAL SCENE related to singing tutorials — for
+  example: a microphone close-up, a recording studio with warm lights,
+  a vintage radio, sheet music in dramatic lighting, a vocal booth.
+  Choose ONE scene element, not a collage.
 
-  const textStyleInstruction = textStyleDescriptions[pattern.text_style] || textStyleDescriptions.bold_outline;
+## Video Context
+"${title}" — a singing tutorial video for the 簡單歌唱 Singple. channel.
 
-  return `Generate a YouTube thumbnail design image at 1280x720 pixels (16:9 aspect ratio).
-
-## Design Requirements
-- ${layoutInstruction}
-- Color scheme: ${colorInstruction}
-- Add decorative elements: arrows, sparkles, emoji-style icons, or geometric shapes to make it eye-catching
-- The overall design should feel energetic, professional, and click-worthy
-
-## Text on the Thumbnail
-- Display this Chinese text prominently: "${thumbnailText}"
-- Text style: ${textStyleInstruction}
-- The text must be LARGE (at least 120px equivalent), bold, and readable even at small sizes
-- Position the text according to the layout description above
-
-## Context
-This is for a singing tutorial YouTube channel. The video title is: "${title}"
-
-## Critical Rules
-- DO NOT draw any people, faces, or human figures
-- DO NOT leave any large gray or empty placeholder areas
-- The ENTIRE 1280x720 canvas must be filled with the design
-- Make it look like a professional YouTube thumbnail design (without the person)`;
+## CRITICAL RULES
+- DO NOT draw any people, faces, hands, or human figures
+- DO NOT add any decorative graphics (arrows, sparkles, emoji, music notes, glows)
+- DO NOT make it look like a stock illustration or advertisement banner
+- The result should look like a real photo with one bold text overlay,
+  in the documentary style of the reference thumbnails
+- Output only the image`;
 }
 
 async function generateDesignBackground(
-  pattern: ThumbnailPattern,
+  reference: ReferencePattern,
   thumbnailText: string,
   title: string,
   candidateIndex: number,
+  fewShotReferences: ReferencePattern[],
 ): Promise<Buffer> {
-  const prompt = buildDesignPrompt(pattern, thumbnailText, title);
-  console.log(`[Thumbnail Generator] Generating design background #${candidateIndex} (${pattern.layout_type}, ${pattern.color_scheme})`);
+  const layoutType = reference.suggested_layout || 'face_right_text_left';
+  const prompt = buildDesignPrompt(reference, thumbnailText, title, layoutType);
+
+  // Collect inline image parts from references that have actual base64 data
+  // (cold-start defaults won't have any — Gemini will fall back to text-only)
+  const referenceImages = fewShotReferences
+    .filter((r) => r.reference_image_b64)
+    .map((r) => r.reference_image_b64 as string);
+
+  console.log(`[Thumbnail Generator] Generating background #${candidateIndex} (layout=${layoutType}, refs=${referenceImages.length})`);
 
   let lastError: Error | null = null;
 
-  // Retry once on failure
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const base64Image = await callGeminiImage(prompt);
+      // Pass first reference image as the primary input to Gemini for
+      // image-to-image style transfer. callGeminiImage only accepts one
+      // input image, but the prompt text describes all 3 references.
+      // (If we want true 3-image few-shot, we'd extend callGeminiImage —
+      // POC-C verified the API accepts multiple inlineData parts, see the
+      // poc-c-fewshot.mjs script for the multi-image variant.)
+      const base64Image = await callGeminiImageMultiRef(prompt, referenceImages, 0.7);
       const buffer = Buffer.from(base64Image, 'base64');
 
-      // Ensure the image is exactly 1280x720
       const resized = await sharp(buffer)
         .resize(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT, { fit: 'cover' })
         .jpeg({ quality: 95 })
@@ -379,15 +424,56 @@ async function generateDesignBackground(
       return resized;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
-      console.warn(`[Thumbnail Generator] Design generation attempt ${attempt + 1} failed for candidate #${candidateIndex}: ${lastError.message}`);
-      if (attempt === 0) {
-        // Brief pause before retry
-        await new Promise(r => setTimeout(r, 2000));
-      }
+      console.warn(`[Thumbnail Generator] Background generation attempt ${attempt + 1} failed for #${candidateIndex}: ${lastError.message}`);
+      if (attempt === 0) await new Promise(r => setTimeout(r, 2000));
     }
   }
 
-  throw lastError || new Error(`Design generation failed for candidate #${candidateIndex}`);
+  throw lastError || new Error(`Background generation failed for candidate #${candidateIndex}`);
+}
+
+/**
+ * Variant of callGeminiImage that accepts multiple reference images.
+ * POC-C (2026-04-07) verified this works with Nano Banana Pro.
+ */
+async function callGeminiImageMultiRef(
+  prompt: string,
+  referenceImagesB64: string[],
+  temperature = 0.7,
+): Promise<string> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL_PRO}:generateContent?key=${GEMINI_API_KEY}`;
+
+  const parts: any[] = [{ text: prompt }];
+  for (const ref of referenceImagesB64) {
+    parts.push({ inlineData: { mimeType: 'image/jpeg', data: ref } });
+  }
+
+  const payload = {
+    contents: [{ parts }],
+    generationConfig: {
+      responseModalities: ['TEXT', 'IMAGE'],
+      temperature,
+    },
+  };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 180000);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    const data = await res.json() as Record<string, any>;
+    const respParts = data?.candidates?.[0]?.content?.parts || [];
+    for (const p of respParts) {
+      if (p.inlineData?.data) return p.inlineData.data;
+    }
+    throw new Error(`Gemini multi-ref returned no image: ${JSON.stringify(data).substring(0, 300)}`);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 // ── Step 4: Composite with Sharp ───────────────────────────
@@ -489,6 +575,37 @@ async function removeBackgroundFromFrame(personFrameBase64: string): Promise<Buf
 }
 
 /**
+ * Sharp-only beautify — POC-B (2026-04-07) confirmed Gemini "subtle"
+ * beautify still alters facial expression and identity. Karen explicitly
+ * chose option A: Sharp-only, never touch the face shape.
+ *
+ * What this does (subtle level):
+ * - Slight brightness lift (+3%)
+ * - Slight saturation boost (+5%) for warmer skin tone
+ * - Light unsharp mask for crisper eyes/edges
+ * - No blur, no smoothing, no acne removal — those would soften features
+ *
+ * What this CANNOT do: remove acne, even out skin tone. That requires
+ * pixel-level understanding which Sharp doesn't have. A future PR can
+ * add OpenCV face landmarks + masked blur if Karen wants real去痘.
+ */
+async function beautifyPersonFrameSharp(
+  cutoutPng: Buffer,
+  level: 'off' | 'subtle' = 'subtle',
+): Promise<Buffer> {
+  if (level === 'off') return cutoutPng;
+
+  return sharp(cutoutPng)
+    .modulate({
+      brightness: 1.03,
+      saturation: 1.05,
+    })
+    .sharpen({ sigma: 0.6, m1: 0.5, m2: 2.0 })
+    .png()
+    .toBuffer();
+}
+
+/**
  * Select the best frame from the provided frames array.
  * Picks the frame closest to 1/3 into the video (often a good representative frame).
  */
@@ -516,14 +633,13 @@ async function compositeCandidate(
 
   // Resize the cutout to fit within the layout slot, preserving aspect ratio.
   // 'inside' means the result may be smaller in one dimension — we then anchor
-  // it so the person stays grounded within the slot.
+  // it so the person stays grounded within the slot. Beautify already happened
+  // upstream in beautifyPersonFrameSharp(), so no modulate/sharpen here.
   const personResized = await sharp(personCutoutPng)
     .resize(placement.personWidth, placement.personHeight, {
       fit: 'inside',
       withoutEnlargement: false,
     })
-    .modulate({ brightness: 1.05 })
-    .sharpen({ sigma: 0.5 })
     .png()
     .toBuffer();
 
@@ -586,13 +702,12 @@ export async function generateThumbnails(params: {
 
   console.log(`[Thumbnail Generator] Starting for job ${jobId} — ${frames.length} frames, type: ${videoType}`);
 
-  // ── Step 1: Select patterns ──────────────────────────────
-  progress(5, 'thumbnail_patterns', '選擇縮圖設計模式...');
-  const patterns = await selectPatterns();
-  console.log(`[Thumbnail Generator] Selected patterns: ${patterns.map(p => `${p.id}(${p.layout_type})`).join(', ')}`);
+  // ── Step 1: Select references (locked-channel learner pool) ──
+  progress(5, 'thumbnail_patterns', '選擇 reference 縮圖（影視颶風 / MrBeast）...');
+  const references = await selectReferences();
 
   // ── Step 2: Generate thumbnail texts ─────────────────────
-  progress(15, 'thumbnail_text', '生成縮圖文字...');
+  progress(15, 'thumbnail_text', '生成縮圖大字（對峙句型）...');
   const texts = await generateThumbnailTexts(title, videoSummary, videoType);
   console.log(`[Thumbnail Generator] Generated texts: ${texts.join(', ')}`);
 
@@ -602,8 +717,10 @@ export async function generateThumbnails(params: {
 
   const [designResults, personCutoutResult] = await Promise.all([
     Promise.allSettled(
-      patterns.map((pattern, i) =>
-        generateDesignBackground(pattern, texts[i], title, i)
+      references.map((ref, i) =>
+        // Each candidate sees ALL 3 references as few-shot context, but
+        // only one reference acts as the "primary" for layout selection
+        generateDesignBackground(ref, texts[i], title, i, references)
       ),
     ),
     // Run background removal in parallel with design generation
@@ -614,8 +731,12 @@ export async function generateThumbnails(params: {
   ]);
 
   // Fallback: if background removal failed, use raw frame as opaque PNG
-  const personCutoutPng = personCutoutResult ?? await sharp(Buffer.from(bestFrame, 'base64')).png().toBuffer();
-  console.log(`[Thumbnail Generator] Person cutout ready (${personCutoutResult ? 'background removed' : 'raw fallback'})`);
+  const personCutoutRaw = personCutoutResult ?? await sharp(Buffer.from(bestFrame, 'base64')).png().toBuffer();
+
+  // Apply Sharp-only beautify (POC-B confirmed Gemini beautify changes
+  // facial expression — that's unacceptable for Karen's viral hook frames)
+  const personCutoutPng = await beautifyPersonFrameSharp(personCutoutRaw, 'subtle');
+  console.log(`[Thumbnail Generator] Person cutout ready (${personCutoutResult ? 'bg removed' : 'raw fallback'}, beautify=subtle)`);
 
   // ── Step 4: Composite person + background ────────────────
   progress(65, 'thumbnail_composite', '合成人物與背景...');
@@ -631,11 +752,11 @@ export async function generateThumbnails(params: {
     const designBackground = designResult.value;
 
     try {
-      // Composite
+      // Composite — use the reference's suggested_layout for placement
       const composited = await compositeCandidate(
         designBackground,
         personCutoutPng,
-        patterns[i].layout_type,
+        references[i].suggested_layout || 'face_right_text_left',
       );
 
       // ── Step 5: Upload ──────────────────────────────────
@@ -645,7 +766,10 @@ export async function generateThumbnails(params: {
       candidates.push({
         imageUrl,
         thumbnailText: texts[i],
-        patternId: patterns[i].id,
+        patternId: references[i].id,
+        referenceVideoIds: references
+          .map((r) => r.video_id)
+          .filter((v): v is string => v !== null),
       });
 
       console.log(`[Thumbnail Generator] Candidate #${i} complete: ${imageUrl}`);

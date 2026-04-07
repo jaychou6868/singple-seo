@@ -15,7 +15,7 @@ import { Storage } from '@google-cloud/storage';
 import { createClient } from '@supabase/supabase-js';
 import { processVideoSeo, deleteGcsObject, extractThumbnailTimestamps } from './seo-video.js';
 import { runViralLearner, testViralLearnerSave } from './viral-learner.js';
-import { runThumbnailLearner } from './thumbnail-learner.js';
+import { runLockedChannelLearner } from './locked-channel-learner.js';
 import { generateThumbnails } from './thumbnail-generator.js';
 import { nanoid } from 'nanoid';
 
@@ -415,6 +415,31 @@ seoRoutes.get('/thumbnail/test-timestamps/:jobId', async (c) => {
   return c.json({ ok: true, fileUri, timestamps, count: timestamps.length });
 });
 
+// ── Thumbnail: Manual learn from locked channels ──────────
+//
+// Triggers the locked-channel learner (MrBeast + 影視颶風) to refresh the
+// reference pool used by /thumbnail/generate. Protected by ADMIN_KEY env
+// var to prevent random callers burning Gemini quota.
+
+seoRoutes.post('/thumbnail/learn', async (c) => {
+  const adminKey = process.env.ADMIN_KEY;
+  if (adminKey) {
+    if (c.req.header('x-admin-key') !== adminKey) {
+      return c.json({ error: 'Unauthorized — provide X-Admin-Key header' }, 401);
+    }
+  } else {
+    console.warn('[Locked Learner] ADMIN_KEY env var not set — endpoint is unprotected');
+  }
+
+  try {
+    const result = await runLockedChannelLearner();
+    return c.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('Locked-channel learner error:', err);
+    return c.json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
+  }
+});
+
 // ── Thumbnail: Get candidates ─────────────────────────────
 
 seoRoutes.get('/thumbnail/candidates/:jobId', async (c) => {
@@ -482,17 +507,8 @@ seoRoutes.post('/viral-learn', async (c) => {
   try {
     const result = await runViralLearner();
 
-    // Chain Thumbnail Learner: use overperformer videoIds from Viral Learner tracker
-    const { data: tracker } = await supabase
-      .from('seo_trackers')
-      .select('data')
-      .eq('id', 'viral_learner')
-      .single();
-    const latestReport = tracker?.data?.reports?.slice(-1)?.[0];
-    if (latestReport?.overperformerIds?.length) {
-      console.log(`[Viral Learn] Chaining Thumbnail Learner with ${latestReport.overperformerIds.length} IDs`);
-      runThumbnailLearner(latestReport.overperformerIds).catch(console.error);
-    }
+    // Note: thumbnail learning is no longer chained to viral-learner — it now
+    // runs only on manual POST /thumbnail/learn (locked channels only).
 
     return c.json({ ok: true, result });
   } catch (err) {
