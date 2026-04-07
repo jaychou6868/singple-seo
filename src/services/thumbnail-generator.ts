@@ -721,11 +721,20 @@ async function removeBackgroundFromFrame(personFrameBase64: string): Promise<Buf
   // through the body.
   const inputBuffer = Buffer.from(personFrameBase64, 'base64');
 
+  // Karen 2026-04-07 Zeabur 502: imgly + 1920×1080 + parallel Gemini =
+  // OOM/timeout. Downsize to 960×540 (¼ pixels) before imgly. We don't
+  // lose quality because the cutout is then composited into a 640px-wide
+  // slot anyway.
+  const downsized = await sharp(inputBuffer)
+    .resize(960, 540, { fit: 'inside' })
+    .jpeg({ quality: 92 })
+    .toBuffer();
+
   // imgly internally calls Blob([buf]) without type when given a Buffer,
   // producing empty mime → "Unsupported format" error. Wrap explicitly.
   // Use node:buffer Blob (not global) for cross-runtime safety on Zeabur.
   const { Blob: NodeBlob } = await import('node:buffer');
-  const inputBlob = new NodeBlob([inputBuffer], { type: 'image/jpeg' });
+  const inputBlob = new NodeBlob([downsized], { type: 'image/jpeg' });
 
   const blob = await imglyRemoveBackground(inputBlob as any, {
     model: 'medium',
