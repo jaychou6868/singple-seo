@@ -125,7 +125,7 @@ async function downloadBatch(videos: VideoMeta[]): Promise<ThumbnailRow[]> {
 
 // ── Step 3: Gemini analysis ────────────────────────────────
 
-async function analyzeThumbnail(thumb: ThumbnailRow): Promise<StyleAnalysis | null> {
+async function analyzeThumbnail(thumb: ThumbnailRow): Promise<{ ok: true; analysis: StyleAnalysis } | { ok: false; error: string }> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
   const prompt = `你是 YouTube 縮圖視覺策略分析師。分析這張縮圖的視覺語法，輸出 JSON。
@@ -178,14 +178,20 @@ async function analyzeThumbnail(thumb: ThumbnailRow): Promise<StyleAnalysis | nu
       body: JSON.stringify(body),
     });
     const data = await res.json() as any;
+    if (data?.error) {
+      const msg = `${data.error.code || 'unknown'}: ${data.error.message || JSON.stringify(data.error).substring(0, 200)}`;
+      console.warn(`[Locked Learner] Gemini error for ${thumb.videoId}: ${msg}`);
+      return { ok: false, error: `gemini_error: ${msg}` };
+    }
     const parts = data?.candidates?.[0]?.content?.parts || [];
     let text = '';
     for (let i = parts.length - 1; i >= 0; i--) {
       if (parts[i].text) { text = parts[i].text; break; }
     }
     if (!text) {
-      console.warn(`[Locked Learner] Empty Gemini response for ${thumb.videoId}`);
-      return null;
+      const finishReason = data?.candidates?.[0]?.finishReason || 'unknown';
+      console.warn(`[Locked Learner] Empty Gemini response for ${thumb.videoId} (finishReason=${finishReason})`);
+      return { ok: false, error: `empty_response: finishReason=${finishReason}` };
     }
     const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
     let parsed: any;
@@ -194,21 +200,29 @@ async function analyzeThumbnail(thumb: ThumbnailRow): Promise<StyleAnalysis | nu
     } catch {
       const match = cleaned.match(/\{[\s\S]*\}/);
       if (match) {
-        try { parsed = JSON.parse(match[0]); } catch { return null; }
+        try { parsed = JSON.parse(match[0]); } catch {
+          return { ok: false, error: `parse_failed: ${cleaned.substring(0, 100)}` };
+        }
       } else {
-        return null;
+        return { ok: false, error: `no_json_found: ${cleaned.substring(0, 100)}` };
       }
     }
-    if (!parsed?.style_description || !parsed?.suggested_layout) return null;
+    if (!parsed?.style_description || !parsed?.suggested_layout) {
+      return { ok: false, error: `missing_fields: ${JSON.stringify(parsed).substring(0, 100)}` };
+    }
     return {
-      style_description: parsed.style_description,
-      suggested_layout: parsed.suggested_layout,
-      has_person: parsed.has_person !== false,
-      view_count_estimate: null,
+      ok: true,
+      analysis: {
+        style_description: parsed.style_description,
+        suggested_layout: parsed.suggested_layout,
+        has_person: parsed.has_person !== false,
+        view_count_estimate: null,
+      },
     };
   } catch (err) {
-    console.error(`[Locked Learner] Analysis failed for ${thumb.videoId}:`, err);
-    return null;
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[Locked Learner] Analysis exception for ${thumb.videoId}: ${msg}`);
+    return { ok: false, error: `exception: ${msg}` };
   }
 }
 
@@ -217,27 +231,47 @@ async function analyzeThumbnail(thumb: ThumbnailRow): Promise<StyleAnalysis | nu
 async function upsertReference(
   thumb: ThumbnailRow,
   analysis: StyleAnalysis,
-): Promise<boolean> {
-  const { error } = await supabase
-    .from('seo_thumbnail_patterns')
-    .upsert({
-      video_id: thumb.videoId,
-      channel_source: thumb.source,
-      reference_image_b64: thumb.base64,
-      style_description: analysis.style_description,
-      suggested_layout: analysis.suggested_layout,
-      view_count: analysis.view_count_estimate,
-      learned_at: new Date().toISOString(),
-      // Keep weight column populated for backward compat (the generator no
-      // longer reads enum columns but the row still needs a weight value)
-      weight: 1.0,
-    }, { onConflict: 'video_id' });
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  // Manual upsert: SELECT existing by video_id, then INSERT or UPDATE.
+  // We avoid Supabase's .upsert(onConflict) because that requires a
+  // non-partial unique index, and we want to keep the index partial
+  // (so old enum rows with NULL video_id don't conflict).
+  const row = {
+    video_id: thumb.videoId,
+    channel_source: thumb.source,
+    reference_image_b64: thumb.base64,
+    style_description: analysis.style_description,
+    suggested_layout: analysis.suggested_layout,
+    view_count: analysis.view_count_estimate,
+    learned_at: new Date().toISOString(),
+    // Keep weight column populated for backward compat (the generator no
+    // longer reads enum columns but the row still needs a weight value)
+    weight: 1.0,
+  };
 
-  if (error) {
-    console.error(`[Locked Learner] UPSERT failed for ${thumb.videoId}:`, error);
-    return false;
+  const { data: existing, error: selErr } = await supabase
+    .from('seo_thumbnail_patterns')
+    .select('id')
+    .eq('video_id', thumb.videoId)
+    .maybeSingle();
+
+  if (selErr) {
+    return { ok: false, error: `select: ${selErr.message}` };
   }
-  return true;
+
+  if (existing) {
+    const { error: updErr } = await supabase
+      .from('seo_thumbnail_patterns')
+      .update(row)
+      .eq('id', existing.id);
+    if (updErr) return { ok: false, error: `update: ${updErr.message}` };
+  } else {
+    const { error: insErr } = await supabase
+      .from('seo_thumbnail_patterns')
+      .insert(row);
+    if (insErr) return { ok: false, error: `insert: ${insErr.message}` };
+  }
+  return { ok: true };
 }
 
 // ── Main ────────────────────────────────────────────────────
@@ -249,6 +283,7 @@ export async function runLockedChannelLearner(): Promise<{
   analyzed: number;
   filteredNoPerson: number;
   stored: number;
+  errors: { videoId: string; stage: string; error: string }[];
 }> {
   console.log('[Locked Learner] Start — locked channels:',
     LOCKED_CHANNELS.map(c => `${c.source}:${c.id}`).join(', '));
@@ -268,21 +303,31 @@ export async function runLockedChannelLearner(): Promise<{
   const thumbs = await downloadBatch(allVideos);
   console.log(`[Locked Learner] Downloaded: ${thumbs.length}/${allVideos.length}`);
 
-  // 3. Analyze each (sequential to avoid Gemini rate limit; per-thumb is fast)
+  // 3. Analyze each (sequential to avoid Gemini rate limit; per-thumb is fast).
+  // Collect errors so the endpoint can return them in the response — we have
+  // no other way to see Zeabur logs from outside.
+  const errors: { videoId: string; stage: string; error: string }[] = [];
   let analyzedCount = 0;
   let filteredNoPerson = 0;
   let stored = 0;
   for (const thumb of thumbs) {
-    const analysis = await analyzeThumbnail(thumb);
-    if (!analysis) continue;
+    const result = await analyzeThumbnail(thumb);
+    if (!result.ok) {
+      errors.push({ videoId: thumb.videoId, stage: 'analyze', error: result.error });
+      continue;
+    }
     analyzedCount++;
-    if (!analysis.has_person) {
+    if (!result.analysis.has_person) {
       filteredNoPerson++;
       console.log(`[Locked Learner] Skipped ${thumb.videoId} (no person)`);
       continue;
     }
-    const ok = await upsertReference(thumb, analysis);
-    if (ok) stored++;
+    const upsertResult = await upsertReference(thumb, result.analysis);
+    if (upsertResult.ok) {
+      stored++;
+    } else {
+      errors.push({ videoId: thumb.videoId, stage: 'upsert', error: upsertResult.error });
+    }
   }
 
   const result = {
@@ -292,7 +337,8 @@ export async function runLockedChannelLearner(): Promise<{
     analyzed: analyzedCount,
     filteredNoPerson,
     stored,
+    errors,
   };
-  console.log('[Locked Learner] Done:', result);
+  console.log('[Locked Learner] Done:', { ...result, errors: `${errors.length} errors` });
   return result;
 }
