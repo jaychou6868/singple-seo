@@ -170,34 +170,25 @@ export async function beautifyFace(
     return cutoutPng;
   }
 
-  // Karen 2026-04-07: subtle 1.4 → 1.8 (skin smoothing).
-  // Higher than 2.5 produces a halo where blur leaks past face_box.
+  // Karen 2026-04-07: subtle 1.4 felt too gentle, bumped to 1.8.
+  // Higher than 2.2 starts producing a halo where blur leaks past face_box.
   const blurSigma = level === 'subtle' ? 1.8 : 2.5;
 
-  // Karen 2026-04-07: median(7) made the face look like a mosaic on a
-  // close-up — large window size produces visible color blocks on
-  // continuous areas. Dropped to 3 (Sharp's smallest), which still
-  // smooths the smallest point defects without blocking the face.
-  // moderate uses 5 instead of 11.
-  const medianWindow = level === 'subtle' ? 3 : 5;
-
-  // 1. Extract face region, apply median (去痘) → blur (磨皮) → brightness (美白)
-  const cleanedFace = await sharp(cutoutPng)
+  // 1. Extract face region, blur it (smooths skin)
+  const blurredFace = await sharp(cutoutPng)
     .extract(faceRect)
-    .median(medianWindow)
     .blur(blurSigma)
-    .modulate({ brightness: 1.10 })  // 美白 +10%, only on face
     .png()
     .toBuffer();
 
-  // 2. Composite cleaned face back onto the original
+  // 2. Composite blurred face back onto the original
   let result = await sharp(cutoutPng)
-    .composite([{ input: cleanedFace, left: faceRect.left, top: faceRect.top, blend: 'over' }])
+    .composite([{ input: blurredFace, left: faceRect.left, top: faceRect.top, blend: 'over' }])
     .png()
     .toBuffer();
 
   // 3. Re-overlay each feature region from the ORIGINAL on top of the
-  //    cleaned face, so eyes/nose/mouth stay sharp. Without this step
+  //    blurred face, so eyes/nose/mouth stay sharp. Without this step
   //    the features look soft and "doll-like".
   const featureBoxes: BBox[] = [
     boxes.left_eye_box,
@@ -224,10 +215,9 @@ export async function beautifyFace(
     }
   }
 
-  // 4. Light global sharpen on the whole cutout (no global brightness —
-  //    that goes only on the face above, otherwise the body and hair
-  //    over-expose).
+  // 4. Final brightness/saturation lift on the whole cutout
   result = await sharp(result)
+    .modulate({ brightness: 1.03, saturation: 1.05 })
     .sharpen({ sigma: 0.5 })
     .png()
     .toBuffer();
