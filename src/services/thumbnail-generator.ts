@@ -463,6 +463,47 @@ AVOID: purple, pink, neon, gradient pastels.
 - Output only the image`;
 }
 
+/**
+ * Quality gate: detect if a generated background contains people (Gemini
+ * sometimes ignores "DO NOT draw people" prompts and paints a person in
+ * the slot meant for our cutout, producing ghost-arms/multi-body effects
+ * after composite). Returns true if the background is clean.
+ *
+ * Karen 2026-04-07: this exists because we composite a real Karen cutout
+ * onto the background — if Gemini already drew a person, we get two
+ * overlapping people. Visual horror.
+ */
+async function backgroundHasNoPerson(jpegBuffer: Buffer): Promise<boolean> {
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+    const b64 = jpegBuffer.toString('base64');
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { text: 'Does this image contain any visible person, face, hand, arm, body, or human figure (real or drawn)? Answer ONLY "yes" or "no" (lowercase, single word, nothing else).' },
+            { inlineData: { mimeType: 'image/jpeg', data: b64 } },
+          ],
+        }],
+        generationConfig: { temperature: 0, maxOutputTokens: 16 },
+      }),
+    });
+    const data = await res.json() as any;
+    const parts = data?.candidates?.[0]?.content?.parts || [];
+    let text = '';
+    for (const p of parts) if (p.text) { text = p.text; break; }
+    const answer = text.trim().toLowerCase();
+    const hasPerson = answer.startsWith('yes');
+    console.log(`[Thumbnail Generator] background person check: "${answer}" → clean=${!hasPerson}`);
+    return !hasPerson;
+  } catch (err) {
+    console.warn('[Thumbnail Generator] background person check failed (assume clean):', err);
+    return true;  // fail-open: don't block generation if check fails
+  }
+}
+
 async function generateDesignBackground(
   reference: ReferencePattern,
   thumbnailText: string,
@@ -484,28 +525,41 @@ async function generateDesignBackground(
 
   let lastError: Error | null = null;
 
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // Up to 3 attempts: each attempt generates + person-checks. If person
+  // detected, the next attempt has a stronger no-person clause prepended.
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const base64Image = await callGeminiImageMultiRef(prompt, referenceImages, 0.95);
+      const attemptPrompt = attempt === 0
+        ? prompt
+        : `🚫 ABSOLUTE RULE: This image must NOT contain any person, face, hand, arm, body, human figure, or any humanoid silhouette. The previous attempt failed because you drew a person — do not draw any. Empty scene only.\n\n${prompt}`;
+
+      const base64Image = await callGeminiImageMultiRef(prompt === attemptPrompt ? prompt : attemptPrompt, referenceImages, 0.95);
       const buffer = Buffer.from(base64Image, 'base64');
 
-      // Output dimension validation (Q4 quality gate): if Gemini returned
-      // a non-16:9 image, sharp.resize will cover-crop it which is fine.
-      // We don't reject — just normalize.
       const resized = await sharp(buffer)
         .resize(THUMBNAIL_WIDTH, THUMBNAIL_HEIGHT, { fit: 'cover' })
         .jpeg({ quality: 95 })
         .toBuffer();
 
-      return resized;
+      // Quality gate: ensure background has no person
+      const isClean = await backgroundHasNoPerson(resized);
+      if (isClean) {
+        if (attempt > 0) {
+          console.log(`[Thumbnail Generator] background #${candidateIndex} clean on attempt ${attempt + 1}`);
+        }
+        return resized;
+      }
+
+      console.warn(`[Thumbnail Generator] background #${candidateIndex} contains person on attempt ${attempt + 1}, retrying`);
+      lastError = new Error('background contained drawn person');
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
       console.warn(`[Thumbnail Generator] Background generation attempt ${attempt + 1} failed for #${candidateIndex}: ${lastError.message}`);
-      if (attempt === 0) await new Promise(r => setTimeout(r, 2000));
     }
+    await new Promise(r => setTimeout(r, 2000));
   }
 
-  throw lastError || new Error(`Background generation failed for candidate #${candidateIndex}`);
+  throw lastError || new Error(`Background generation failed for candidate #${candidateIndex} after 3 attempts`);
 }
 
 /**
