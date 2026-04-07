@@ -38,6 +38,7 @@ interface FaceBoxes {
   right_eye_box: BBox;
   nose_box: BBox;
   mouth_box: BBox;
+  pimple_boxes?: BBox[];
 }
 
 export type BeautifyLevel = 'off' | 'subtle' | 'moderate';
@@ -54,10 +55,21 @@ async function detectFaceBoxes(jpegBase64: string): Promise<FaceBoxes | null> {
   "left_eye_box": {"y_min": ?, "x_min": ?, "y_max": ?, "x_max": ?},
   "right_eye_box": {"y_min": ?, "x_min": ?, "y_max": ?, "x_max": ?},
   "nose_box": {"y_min": ?, "x_min": ?, "y_max": ?, "x_max": ?},
-  "mouth_box": {"y_min": ?, "x_min": ?, "y_max": ?, "x_max": ?}
+  "mouth_box": {"y_min": ?, "x_min": ?, "y_max": ?, "x_max": ?},
+  "pimple_boxes": [
+    {"y_min": ?, "x_min": ?, "y_max": ?, "x_max": ?}
+  ]
 }
 
 face_box 涵蓋整個臉部含下巴額頭。五官 box 要緊貼但不要切到。
+
+For pimple_boxes:
+- Find any visible acne, pimples, blemishes, red spots, or uneven skin defects on the face only
+- Maximum 8 entries. If skin is clean, return []
+- DO NOT include moles, freckles, dimples, eyebrows, or natural beauty marks
+- Only include reddish/inflamed/uneven defects
+- Box should tightly wrap the defect (no surrounding skin)
+
 只輸出 JSON，不要其他文字。`;
 
   const body = {
@@ -128,6 +140,59 @@ function normalizedToPixels(box: BBox, width: number, height: number): {
   return { left, top, width: Math.max(1, right - left), height: Math.max(1, bottom - top) };
 }
 
+interface PixelRect { left: number; top: number; width: number; height: number; }
+
+/** Check if two pixel rects overlap. */
+function overlaps(a: PixelRect, b: PixelRect): boolean {
+  return !(a.left + a.width < b.left ||
+           b.left + b.width < a.left ||
+           a.top + a.height < b.top ||
+           b.top + b.height < a.top);
+}
+
+/**
+ * Find a rect of healthy skin near a pimple, used as the source for
+ * patch blending. Tries 4 directions (down, left, right, up) at distance
+ * = 1.5x the pimple's size, returning the first one that fits inside
+ * faceRect, the canvas, and doesn't overlap any feature box.
+ */
+function findHealthyPatch(
+  pimple: PixelRect,
+  faceRect: PixelRect,
+  featureRects: PixelRect[],
+  canvasW: number,
+  canvasH: number,
+): PixelRect | null {
+  const offsetX = Math.round(pimple.width * 1.5);
+  const offsetY = Math.round(pimple.height * 1.5);
+
+  const candidates: PixelRect[] = [
+    // Down
+    { ...pimple, top: pimple.top + offsetY },
+    // Left
+    { ...pimple, left: pimple.left - offsetX },
+    // Right
+    { ...pimple, left: pimple.left + offsetX },
+    // Up
+    { ...pimple, top: pimple.top - offsetY },
+  ];
+
+  for (const c of candidates) {
+    // Must fit inside the canvas
+    if (c.left < 0 || c.top < 0) continue;
+    if (c.left + c.width > canvasW) continue;
+    if (c.top + c.height > canvasH) continue;
+    // Must be inside the face_box
+    if (c.left < faceRect.left || c.top < faceRect.top) continue;
+    if (c.left + c.width > faceRect.left + faceRect.width) continue;
+    if (c.top + c.height > faceRect.top + faceRect.height) continue;
+    // Must not overlap any feature box (eyes/nose/mouth)
+    if (featureRects.some(f => overlaps(c, f))) continue;
+    return c;
+  }
+  return null;
+}
+
 // ── Main beautify ──────────────────────────────────────────
 
 /**
@@ -170,8 +235,8 @@ export async function beautifyFace(
     return cutoutPng;
   }
 
-  // Karen 2026-04-07: subtle 1.4 felt too gentle, bumped to 1.8.
-  // Higher than 2.2 starts producing a halo where blur leaks past face_box.
+  // Karen 2026-04-07: subtle 1.4 → 1.8 (skin smoothing).
+  // Higher than 2.5 produces a halo where blur leaks past face_box.
   const blurSigma = level === 'subtle' ? 1.8 : 2.5;
 
   // 1. Extract face region, blur it (smooths skin)
@@ -187,9 +252,68 @@ export async function beautifyFace(
     .png()
     .toBuffer();
 
-  // 3. Re-overlay each feature region from the ORIGINAL on top of the
-  //    blurred face, so eyes/nose/mouth stay sharp. Without this step
-  //    the features look soft and "doll-like".
+  // 3. NEW: Patch blending — for each pimple Gemini found, copy a
+  //    healthy nearby skin patch over it. This is point-defect removal
+  //    that doesn't posterize the whole face the way median(7) did.
+  const featureRects: PixelRect[] = [
+    boxes.left_eye_box,
+    boxes.right_eye_box,
+    boxes.nose_box,
+    boxes.mouth_box,
+  ]
+    .filter(Boolean)
+    .map(b => normalizedToPixels(b, W, H));
+
+  const pimples = (boxes.pimple_boxes || []).slice(0, 8);
+  let patchedCount = 0;
+  for (const pb of pimples) {
+    const pimpleRect = normalizedToPixels(pb, W, H);
+    // Skip implausibly small or large detections (false positives)
+    if (pimpleRect.width < 4 || pimpleRect.height < 4) continue;
+    if (pimpleRect.width > 30 || pimpleRect.height > 30) continue;
+    // Skip if the pimple overlaps any feature — never touch eyes/nose/mouth
+    if (featureRects.some(f => overlaps(pimpleRect, f))) continue;
+
+    const patchRect = findHealthyPatch(pimpleRect, faceRect, featureRects, W, H);
+    if (!patchRect) continue;
+
+    try {
+      const patch = await sharp(cutoutPng)
+        .extract(patchRect)
+        .blur(0.5)
+        .resize(pimpleRect.width, pimpleRect.height)  // ensure exact size match
+        .png()
+        .toBuffer();
+      result = await sharp(result)
+        .composite([{ input: patch, left: pimpleRect.left, top: pimpleRect.top, blend: 'over' }])
+        .png()
+        .toBuffer();
+      patchedCount++;
+    } catch (err) {
+      console.warn('[Beautify] patch blending failed for pimple, skipping:', err);
+    }
+  }
+  if (pimples.length > 0) {
+    console.log(`[Beautify] Patch-blended ${patchedCount}/${pimples.length} pimples`);
+  }
+
+  // 4. NEW: Face-only brightness lift (美白 +5%, skin only).
+  //    Karen 2026-04-07: tried 1.10 face-only, too strong. Tried 1.03
+  //    global, OK but not enough. 1.05 face-only is the middle ground.
+  //    No saturation change to avoid hue shift.
+  const brightenedFace = await sharp(result)
+    .extract(faceRect)
+    .modulate({ brightness: 1.05 })
+    .png()
+    .toBuffer();
+  result = await sharp(result)
+    .composite([{ input: brightenedFace, left: faceRect.left, top: faceRect.top, blend: 'over' }])
+    .png()
+    .toBuffer();
+
+  // 5. Re-overlay each feature region from the ORIGINAL on top of the
+  //    processed face, so eyes/nose/mouth stay sharp + at original
+  //    brightness. Without this step the features look soft + brightened.
   const featureBoxes: BBox[] = [
     boxes.left_eye_box,
     boxes.right_eye_box,
@@ -215,9 +339,9 @@ export async function beautifyFace(
     }
   }
 
-  // 4. Final brightness/saturation lift on the whole cutout
+  // 6. Light global sharpen (no global brightness — that goes only on
+  //    face_box above to avoid over-exposing body and hair).
   result = await sharp(result)
-    .modulate({ brightness: 1.03, saturation: 1.05 })
     .sharpen({ sigma: 0.5 })
     .png()
     .toBuffer();

@@ -239,12 +239,9 @@ async function upsertReference(
   // non-partial unique index, and we want to keep the index partial
   // (so old enum rows with NULL video_id don't conflict).
   //
-  // The original schema (thumbnail-tables.sql) declared layout_type,
-  // color_scheme, text_style, emotional_hook as NOT NULL — the generator
-  // no longer reads them, but the constraint still applies on insert.
-  // We pass placeholder strings to satisfy the NOT NULL.
+  // Legacy enum columns (layout_type / color_primary / etc.) were
+  // dropped in sql/drop-legacy-enum-columns.sql 2026-04-07.
   const row = {
-    // New schema columns (what the generator actually reads)
     video_id: thumb.videoId,
     channel_source: thumb.source,
     reference_image_b64: thumb.base64,
@@ -253,18 +250,6 @@ async function upsertReference(
     view_count: analysis.view_count_estimate,
     learned_at: new Date().toISOString(),
     weight: 1.0,
-    // Legacy NOT NULL columns from the original thumbnail-tables.sql —
-    // placeholder values, never read by the new generator. Names match
-    // the deleted thumbnail-learner.ts insert exactly.
-    layout_type: analysis.suggested_layout,
-    color_primary: '#000000',
-    color_accent: '#FFFFFF',
-    text_style: 'legacy',
-    text_word_count: 0,
-    text_pattern: 'legacy',
-    expression_type: 'legacy',
-    element_types: '[]',
-    emotional_hook: 'legacy',
   };
 
   const { data: existing, error: selErr } = await supabase
