@@ -151,16 +151,26 @@ async function callGeminiText(prompt: string, systemPrompt?: string): Promise<st
 
 /**
  * Call Gemini image generation model (Nano Banana Pro)
- * Returns base64-encoded image data
+ * Returns base64-encoded image data.
+ * Optional `inputImageBase64` enables image-to-image editing (e.g. background removal).
  */
-async function callGeminiImage(prompt: string): Promise<string> {
+async function callGeminiImage(
+  prompt: string,
+  inputImageBase64?: string,
+  temperature = 0.9,
+): Promise<string> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL_PRO}:generateContent?key=${GEMINI_API_KEY}`;
 
+  const parts: any[] = [{ text: prompt }];
+  if (inputImageBase64) {
+    parts.push({ inlineData: { mimeType: 'image/jpeg', data: inputImageBase64 } });
+  }
+
   const payload = {
-    contents: [{ parts: [{ text: prompt }] }],
+    contents: [{ parts }],
     generationConfig: {
       responseModalities: ['TEXT', 'IMAGE'],
-      temperature: 0.9,
+      temperature,
     },
   };
 
@@ -433,47 +443,47 @@ function getPersonPlacement(layoutType: string): {
 }
 
 /**
- * Create a horizontal gradient mask for smooth blending.
- * The gradient fades from transparent to opaque based on direction.
+ * Remove the background from a person frame using Gemini Nano Banana Pro.
+ *
+ * Strategy: ask Gemini to replace the background with pure green (#00FF00),
+ * then chroma-key the green out in Sharp to produce a real RGBA cutout.
+ *
+ * Why not ask Gemini for "transparent background" directly? Gemini's image
+ * model returns JPEG (no alpha channel) — when asked for transparency it
+ * literally draws a checkerboard pattern, which is unusable.
  */
-async function createGradientMask(
-  width: number,
-  height: number,
-  direction: 'left' | 'right' | 'both',
-): Promise<Buffer> {
-  const gradientWidth = Math.round(width * 0.3); // 30% of person width for gradient
+async function removeBackgroundFromFrame(personFrameBase64: string): Promise<Buffer> {
+  const greenScreenPrompt =
+    'Take this photo and replace the entire background with pure solid green color ' +
+    '(#00FF00, RGB 0,255,0). Keep the person (face, hair, body, clothing) EXACTLY as-is, ' +
+    'do not modify them in any way. Only the background area (walls, room, furniture) ' +
+    'should become solid green. Do not draw a checkerboard pattern. The output should ' +
+    'look like a green-screen chroma-key photo.';
 
-  // Create raw pixel data for a single-channel (alpha) gradient
-  const pixels = Buffer.alloc(width * height);
+  const greenB64 = await callGeminiImage(greenScreenPrompt, personFrameBase64, 0.1);
+  const greenBuffer = Buffer.from(greenB64, 'base64');
 
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let alpha = 255;
+  // Read into raw RGBA pixels
+  const { data, info } = await sharp(greenBuffer)
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
 
-      if (direction === 'left' || direction === 'both') {
-        // Fade on the left edge
-        if (x < gradientWidth) {
-          const leftAlpha = Math.round((x / gradientWidth) * 255);
-          alpha = Math.min(alpha, leftAlpha);
-        }
-      }
-
-      if (direction === 'right' || direction === 'both') {
-        // Fade on the right edge
-        const distFromRight = width - 1 - x;
-        if (distFromRight < gradientWidth) {
-          const rightAlpha = Math.round((distFromRight / gradientWidth) * 255);
-          alpha = Math.min(alpha, rightAlpha);
-        }
-      }
-
-      pixels[y * width + x] = alpha;
+  const px = Buffer.from(data);
+  for (let i = 0; i < px.length; i += 4) {
+    const r = px[i], g = px[i + 1], b = px[i + 2];
+    if (g > 100 && g > r + 50 && g > b + 50) {
+      // Strong green → fully transparent
+      px[i + 3] = 0;
+    } else if (g > 80 && g > r + 20 && g > b + 20) {
+      // Weak green tinge → partial alpha + de-spill green channel
+      const greenness = Math.min(255, (g - Math.max(r, b)) * 3);
+      px[i + 3] = 255 - greenness;
+      px[i + 1] = Math.round((r + b) / 2 + (g - (r + b) / 2) * 0.3);
     }
   }
 
-  return sharp(pixels, {
-    raw: { width, height, channels: 1 },
-  })
+  return sharp(px, { raw: { width: info.width, height: info.height, channels: 4 } })
     .png()
     .toBuffer();
 }
@@ -492,57 +502,57 @@ function selectBestFrame(frames: string[]): string {
 }
 
 /**
- * Composite person frame onto design background with gradient mask blending.
+ * Composite a pre-cut-out person (PNG with alpha) onto the design background.
+ *
+ * The person cutout is resized to fit the layout's slot using `fit: 'inside'`
+ * so we don't crop hair/hands, then placed at the layout's anchor point.
  */
 async function compositeCandidate(
   designBackground: Buffer,
-  personFrameBase64: string,
+  personCutoutPng: Buffer,
   layoutType: string,
 ): Promise<Buffer> {
   const placement = getPersonPlacement(layoutType);
 
-  // Decode and resize person frame
-  const personBuffer = Buffer.from(personFrameBase64, 'base64');
-  const personResized = await sharp(personBuffer)
+  // Resize the cutout to fit within the layout slot, preserving aspect ratio.
+  // 'inside' means the result may be smaller in one dimension — we then anchor
+  // it so the person stays grounded within the slot.
+  const personResized = await sharp(personCutoutPng)
     .resize(placement.personWidth, placement.personHeight, {
-      fit: 'cover',
-      position: 'centre',
+      fit: 'inside',
+      withoutEnlargement: false,
     })
-    .modulate({
-      brightness: 1.05,  // Slight brightness boost
-    })
-    .sharpen({ sigma: 0.5 })  // Subtle sharpening
-    .ensureAlpha()
+    .modulate({ brightness: 1.05 })
+    .sharpen({ sigma: 0.5 })
+    .png()
     .toBuffer();
 
-  // Create gradient mask
-  const gradientMask = await createGradientMask(
-    placement.personWidth,
-    placement.personHeight,
-    placement.gradientDirection,
-  );
+  // Get the actual resized dimensions to compute the final anchor offset
+  const { width: rw = placement.personWidth, height: rh = placement.personHeight } =
+    await sharp(personResized).metadata();
 
-  // Apply gradient mask to person frame (multiply alpha channel)
-  const personWithMask = await sharp(personResized)
-    .composite([{
-      input: gradientMask,
-      blend: 'dest-in',
-    }])
-    .png()  // Need PNG to preserve alpha for compositing
-    .toBuffer();
+  // Anchor: bottom-aligned within the slot, horizontally aligned per layout
+  let left = placement.personX;
+  if (placement.gradientDirection === 'left') {
+    // person on right edge — push to the right of the slot
+    left = placement.personX + (placement.personWidth - rw);
+  } else if (placement.gradientDirection === 'both') {
+    // centered slot — center horizontally
+    left = placement.personX + Math.round((placement.personWidth - rw) / 2);
+  }
+  // gradientDirection 'right' = person on left edge → keep personX (already left edge)
 
-  // Composite person onto design background
-  const result = await sharp(designBackground)
+  const top = placement.personY + (placement.personHeight - rh);
+
+  return sharp(designBackground)
     .composite([{
-      input: personWithMask,
-      left: placement.personX,
-      top: placement.personY,
+      input: personResized,
+      left,
+      top,
       blend: 'over',
     }])
     .jpeg({ quality: 92 })
     .toBuffer();
-
-  return result;
 }
 
 // ── Step 5: Convert to data URL (no external storage needed) ─
@@ -586,15 +596,26 @@ export async function generateThumbnails(params: {
   const texts = await generateThumbnailTexts(title, videoSummary, videoType);
   console.log(`[Thumbnail Generator] Generated texts: ${texts.join(', ')}`);
 
-  // ── Step 3: Generate design backgrounds (parallel) ───────
-  progress(25, 'thumbnail_design', '生成設計背景（3 個候選）...');
+  // ── Step 3: Generate design backgrounds + remove person bg (parallel) ───
+  progress(25, 'thumbnail_design', '生成設計背景 + 去背人物（並行）...');
   const bestFrame = selectBestFrame(frames);
 
-  const designResults = await Promise.allSettled(
-    patterns.map((pattern, i) =>
-      generateDesignBackground(pattern, texts[i], title, i)
+  const [designResults, personCutoutResult] = await Promise.all([
+    Promise.allSettled(
+      patterns.map((pattern, i) =>
+        generateDesignBackground(pattern, texts[i], title, i)
+      ),
     ),
-  );
+    // Run background removal in parallel with design generation
+    removeBackgroundFromFrame(bestFrame).catch((err) => {
+      console.error(`[Thumbnail Generator] Background removal failed, falling back to raw frame:`, err);
+      return null;
+    }),
+  ]);
+
+  // Fallback: if background removal failed, use raw frame as opaque PNG
+  const personCutoutPng = personCutoutResult ?? await sharp(Buffer.from(bestFrame, 'base64')).png().toBuffer();
+  console.log(`[Thumbnail Generator] Person cutout ready (${personCutoutResult ? 'background removed' : 'raw fallback'})`);
 
   // ── Step 4: Composite person + background ────────────────
   progress(65, 'thumbnail_composite', '合成人物與背景...');
@@ -613,7 +634,7 @@ export async function generateThumbnails(params: {
       // Composite
       const composited = await compositeCandidate(
         designBackground,
-        bestFrame,
+        personCutoutPng,
         patterns[i].layout_type,
       );
 
