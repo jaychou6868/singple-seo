@@ -390,7 +390,7 @@ seoRoutes.get('/thumbnail/test-timestamps/:jobId', async (c) => {
   if (process.env.GCS_KEY_JSON) {
     storageOptions = JSON.parse(Buffer.from(process.env.GCS_KEY_JSON, 'base64').toString());
   }
-  const auth = new GoogleAuth({ credentials: storageOptions, scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+  const auth = new GoogleAuth({ credentials: storageOptions, scopes: ['https://www.googleapis.com/auth/generative-language', 'https://www.googleapis.com/auth/cloud-platform'] });
   const client = await auth.getClient();
   const tokenRes = await client.getAccessToken();
 
