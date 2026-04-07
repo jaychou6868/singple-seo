@@ -13,29 +13,9 @@
  */
 
 import sharp from 'sharp';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import { createClient } from '@supabase/supabase-js';
 import { removeBackground as imglyRemoveBackground } from '@imgly/background-removal-node';
 import { beautifyFace } from './face-beautify.js';
-
-// ── Bundled font ─────────────────────────────────────────────
-//
-// Karen 2026-04-07 v29: Zeabur Linux container has no CJK fonts so SVG
-// text rendered as 豆腐 (□). Bundle Noto Sans TC Black with the repo
-// and embed it as base64 in every SVG via @font-face data URL.
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-let CJK_FONT_BASE64 = '';
-try {
-  // dist/services/thumbnail-generator.js → ../../assets/fonts/...
-  const fontPath = path.resolve(__dirname, '../../assets/fonts/NotoSansTC-Black.ttf');
-  CJK_FONT_BASE64 = fs.readFileSync(fontPath).toString('base64');
-  console.log(`[Thumbnail Generator] Loaded CJK font from ${fontPath} (${CJK_FONT_BASE64.length} bytes b64)`);
-} catch (err) {
-  console.error('[Thumbnail Generator] Failed to load CJK font — text will fall back to system fonts:', err);
-}
 
 // ── Config ──────────────────────────────────────────────────
 
@@ -709,29 +689,18 @@ function buildTextOverlaySvg(text: string, layoutType: string): Buffer {
     }
   }
 
-  const fontFaceCss = CJK_FONT_BASE64
-    ? `@font-face {
-        font-family: 'NotoTC';
-        src: url('data:font/ttf;base64,${CJK_FONT_BASE64}') format('truetype');
-      }`
-    : '';
-
-  const svg = `<?xml version="1.0" encoding="UTF-8"?>
-<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <style>
-      ${fontFaceCss}
-      .t {
-        font-family: 'NotoTC', "PingFang TC", "Source Han Sans TC", "Noto Sans CJK TC", sans-serif;
-        font-size: ${fontSize}px;
-        font-weight: 900;
-        fill: #ffffff;
-        stroke: #000000;
-        stroke-width: ${Math.round(fontSize * 0.08)};
-        paint-order: stroke fill;
-      }
-    </style>
-  </defs>
+  const svg = `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .t {
+      font-family: "Noto Sans CJK TC", "Noto Sans CJK SC", "Noto Sans TC", "PingFang TC", "Heiti TC", sans-serif;
+      font-size: ${fontSize}px;
+      font-weight: 900;
+      fill: #ffffff;
+      stroke: #000000;
+      stroke-width: ${Math.round(fontSize * 0.08)};
+      paint-order: stroke fill;
+    }
+  </style>
   ${textElements.join('\n  ')}
 </svg>`;
 
