@@ -275,13 +275,21 @@ export async function extractThumbnailTimestamps(
       }),
     }).then(r => r.json() as Promise<any>);
 
+    if (res?.error) {
+      console.error('[SEO] Thumbnail timestamps Gemini error:', JSON.stringify(res.error).substring(0, 500));
+      return [];
+    }
+
     const parts = res?.candidates?.[0]?.content?.parts || [];
     let text = '';
     for (let i = parts.length - 1; i >= 0; i--) {
       if (parts[i].text) { text = parts[i].text; break; }
     }
 
-    if (!text) return [];
+    if (!text) {
+      console.warn('[SEO] Thumbnail timestamps: empty text from Gemini. Raw response:', JSON.stringify(res).substring(0, 500));
+      return [];
+    }
     const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
     try {
       return JSON.parse(cleaned);
@@ -291,6 +299,7 @@ export async function extractThumbnailTimestamps(
         try { return JSON.parse(match[0]); } catch { /* fall through */ }
       }
     }
+    console.warn('[SEO] Thumbnail timestamps: failed to parse JSON. Text was:', text.substring(0, 300));
     return [];
   } catch (err) {
     console.error('[SEO] Thumbnail timestamp extraction failed:', err);
@@ -690,6 +699,8 @@ export async function processVideoSeo(
   await updateJobProgress(jobId, 95, 'saving', '儲存結果...', onProgress);
   const existingThumbnail = job.caption?.thumbnail;
   if (existingThumbnail) caption.thumbnail = existingThumbnail;
+  // Persist thumbnail timestamps for history/audit (was previously lost on refresh)
+  caption.thumbnail_timestamps = thumbnailTimestamps;
 
   await supabase.from('seo_jobs').update({
     status: 'done',
