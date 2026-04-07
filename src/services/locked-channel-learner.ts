@@ -253,10 +253,17 @@ async function upsertReference(
     view_count: analysis.view_count_estimate,
     learned_at: new Date().toISOString(),
     weight: 1.0,
-    // Legacy NOT NULL columns — placeholder values, never read by generator
+    // Legacy NOT NULL columns from the original thumbnail-tables.sql —
+    // placeholder values, never read by the new generator. Names match
+    // the deleted thumbnail-learner.ts insert exactly.
     layout_type: analysis.suggested_layout,
-    color_scheme: 'legacy',
+    color_primary: '#000000',
+    color_accent: '#FFFFFF',
     text_style: 'legacy',
+    text_word_count: 0,
+    text_pattern: 'legacy',
+    expression_type: 'legacy',
+    element_types: '[]',
     emotional_hook: 'legacy',
   };
 
