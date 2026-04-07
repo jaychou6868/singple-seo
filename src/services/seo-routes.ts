@@ -481,8 +481,9 @@ seoRoutes.get('/thumbnail/debug-imgly', async (c) => {
       '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAAAP/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AL+B/9k=',
       'base64',
     );
+    const inputBlob = new Blob([new Uint8Array(tinyJpeg)], { type: 'image/jpeg' });
     const t0 = Date.now();
-    const blob = await removeBackground(tinyJpeg, { model: 'medium' });
+    const blob = await removeBackground(inputBlob, { model: 'medium' });
     const elapsed = Date.now() - t0;
     const buf = Buffer.from(await blob.arrayBuffer());
     return c.json({
