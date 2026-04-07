@@ -170,7 +170,9 @@ export async function beautifyFace(
     return cutoutPng;
   }
 
-  const blurSigma = level === 'subtle' ? 1.4 : 2.2;
+  // Karen 2026-04-07: subtle 1.4 felt too gentle, bumped to 1.8.
+  // Higher than 2.2 starts producing a halo where blur leaks past face_box.
+  const blurSigma = level === 'subtle' ? 1.8 : 2.5;
 
   // 1. Extract face region, blur it (smooths skin)
   const blurredFace = await sharp(cutoutPng)
