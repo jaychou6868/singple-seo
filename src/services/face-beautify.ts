@@ -174,14 +174,12 @@ export async function beautifyFace(
   // Higher than 2.5 produces a halo where blur leaks past face_box.
   const blurSigma = level === 'subtle' ? 1.8 : 2.5;
 
-  // Karen 2026-04-07: separate "magnitude":
-  // - blur (sigma 1.8) smooths continuous skin texture (磨皮)
-  // - median (window 7) removes point defects like acne (去痘)
-  // - modulate brightness 1.10 brightens skin only (美白 +10%)
-  // Median filter on small windows is the standard "remove blemishes
-  // without softening edges" trick. Sharp's .median() takes a window
-  // size in pixels.
-  const medianWindow = level === 'subtle' ? 7 : 11;
+  // Karen 2026-04-07: median(7) made the face look like a mosaic on a
+  // close-up — large window size produces visible color blocks on
+  // continuous areas. Dropped to 3 (Sharp's smallest), which still
+  // smooths the smallest point defects without blocking the face.
+  // moderate uses 5 instead of 11.
+  const medianWindow = level === 'subtle' ? 3 : 5;
 
   // 1. Extract face region, apply median (去痘) → blur (磨皮) → brightness (美白)
   const cleanedFace = await sharp(cutoutPng)
