@@ -753,9 +753,84 @@ async function removeBackgroundFromFrame(personFrameBase64: string): Promise<Buf
     px[i] = px[i] > 30 ? 255 : 0;
   }
 
+  // Karen 2026-04-07 v18 fix: imgly sometimes leaves false-positive
+  // alpha clusters disconnected from the main person. Keep only the
+  // largest connected component (the person) and zero-alpha everything
+  // else, so floating debris never makes it into the composited output.
+  keepLargestComponent(px, info.width, info.height);
+
   return sharp(px, { raw: { width: info.width, height: info.height, channels: 4 } })
     .png()
     .toBuffer();
+}
+
+/**
+ * Mutate the RGBA pixel buffer to zero-alpha all pixels not in the
+ * largest connected alpha component (4-connected flood fill via
+ * iterative stack).
+ */
+function keepLargestComponent(px: Buffer, width: number, height: number): void {
+  const total = width * height;
+  // visited / label: 0=unvisited, otherwise component id
+  const labels = new Int32Array(total);
+  const sizes: number[] = [0]; // sizes[0] unused
+  let nextLabel = 1;
+
+  // BFS / flood fill
+  const stack: number[] = [];
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x;
+      if (labels[i] !== 0) continue;
+      const alphaIdx = i * 4 + 3;
+      if (px[alphaIdx] === 0) continue;
+
+      // Start a new component
+      const label = nextLabel++;
+      let size = 0;
+      stack.push(i);
+      labels[i] = label;
+      while (stack.length > 0) {
+        const cur = stack.pop()!;
+        size++;
+        const cy = Math.floor(cur / width);
+        const cx = cur - cy * width;
+        // 4 neighbors
+        const neighbors = [
+          cx > 0          ? cur - 1 : -1,
+          cx < width - 1  ? cur + 1 : -1,
+          cy > 0          ? cur - width : -1,
+          cy < height - 1 ? cur + width : -1,
+        ];
+        for (const n of neighbors) {
+          if (n < 0) continue;
+          if (labels[n] !== 0) continue;
+          if (px[n * 4 + 3] === 0) continue;
+          labels[n] = label;
+          stack.push(n);
+        }
+      }
+      sizes.push(size);
+    }
+  }
+
+  if (sizes.length <= 1) return; // no components
+
+  // Find largest
+  let maxLabel = 1;
+  for (let l = 2; l < sizes.length; l++) {
+    if (sizes[l] > sizes[maxLabel]) maxLabel = l;
+  }
+
+  // Zero alpha for any pixel not in the largest component
+  let killed = 0;
+  for (let i = 0; i < total; i++) {
+    if (labels[i] !== 0 && labels[i] !== maxLabel) {
+      px[i * 4 + 3] = 0;
+      killed++;
+    }
+  }
+  console.log(`[Thumbnail Generator] keepLargestComponent: ${sizes.length - 1} components, kept label ${maxLabel} (${sizes[maxLabel]} px), killed ${killed} px in ${sizes.length - 2} other components`);
 }
 
 /**
