@@ -511,42 +511,67 @@ seoRoutes.get('/thumbnail/debug-imgly', async (c) => {
   }
 });
 
-// ── Thumbnail: Debug font load ────────────────────────────
+// ── Thumbnail: Smoke test (v32 split-around-face) ─────────
+//
+// Karen 2026-04-07: end-to-end smoke test for the v32 split layout.
+// Accepts N base64 frames + a fake title, runs generateThumbnails in
+// dryRun mode (no DB writes), returns the resulting candidates inline
+// as base64 data URLs. Use case: after deploying v32 changes, hit this
+// from curl with 1-3 test frames and confirm the new layout renders
+// without booting a full SEO job pipeline.
+//
+// Why a Zeabur endpoint and not a local script: librsvg + Noto CJK
+// fonts only exist inside the Docker container (commit 36e5012). A
+// local node script would render 豆腐.
+//
+// Body: { frames: string[base64], title?: string }
+// Returns: { ok, candidates: [{ thumbnailText, layout_type, image_url }] }
 
-seoRoutes.get('/thumbnail/debug-font', async (c) => {
+seoRoutes.post('/thumbnail/smoke-test', async (c) => {
+  const adminKey = process.env.ADMIN_KEY;
+  if (adminKey && c.req.header('x-admin-key') !== adminKey) {
+    return c.json({ error: 'Unauthorized — provide X-Admin-Key header' }, 401);
+  }
   try {
-    const { default: fs } = await import('fs');
-    const { default: path } = await import('path');
-    const { fileURLToPath } = await import('url');
+    const body = await c.req.json();
+    const frames = (body.frames as string[]) || [];
+    if (!frames.length) {
+      return c.json({ error: 'frames[] required (base64 JPEG, no data: prefix)' }, 400);
+    }
+    const title = body.title || '影視颶風 v32 smoke test';
+    const videoSummary = body.videoSummary || '歌唱教學影片，主題：高音與氣息控制';
+    const videoType = body.videoType || 'tutorial';
 
-    // Try multiple candidate paths from where this module lives at runtime
-    const here = fileURLToPath(import.meta.url);
-    const hereDir = path.dirname(here);
-    const candidates = [
-      path.resolve(hereDir, '../../assets/fonts/NotoSansTC-Black.ttf'),
-      path.resolve(process.cwd(), 'assets/fonts/NotoSansTC-Black.ttf'),
-      path.resolve(process.cwd(), 'dist/assets/fonts/NotoSansTC-Black.ttf'),
-      '/app/assets/fonts/NotoSansTC-Black.ttf',
-    ];
+    // Strip data: prefix if present (same normalization as /thumbnail/generate)
+    const normalized = frames.map((f) => {
+      if (typeof f !== 'string') return f;
+      const commaIdx = f.indexOf(',');
+      if (f.startsWith('data:') && commaIdx > 0) return f.substring(commaIdx + 1);
+      return f;
+    });
 
-    const results = candidates.map(p => {
-      try {
-        const stat = fs.statSync(p);
-        return { path: p, exists: true, size: stat.size };
-      } catch (err) {
-        return { path: p, exists: false, error: (err as any)?.code };
-      }
+    const result = await generateThumbnails({
+      jobId: 'smoke-test-' + Date.now(),
+      frames: normalized,
+      title,
+      videoSummary,
+      videoType,
+      dryRun: true,
     });
 
     return c.json({
       ok: true,
-      cwd: process.cwd(),
-      moduleLocation: here,
-      candidates: results,
+      count: result.candidates.length,
+      candidates: result.candidates.map((c) => ({
+        thumbnailText: c.thumbnailText,
+        patternId: c.patternId,
+        referenceVideoIds: c.referenceVideoIds,
+        image_url: c.imageUrl,
+      })),
     });
   } catch (err) {
-    const e = err as any;
-    return c.json({ ok: false, error: e?.message || String(err) }, 500);
+    console.error('Thumbnail smoke-test error:', err);
+    return c.json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
   }
 });
 

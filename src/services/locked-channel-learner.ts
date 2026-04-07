@@ -53,6 +53,11 @@ interface ThumbnailRow {
 interface StyleAnalysis {
   style_description: string;
   suggested_layout: 'face_left_text_right' | 'face_right_text_left' | 'face_center_text_top' | 'full_frame_overlay';
+  // v32b: enum-only structured field. Karen 2026-04-07 — connecting
+  // generator's split_around_face renderer to learner's reference pool.
+  // Gemini was unreliable returning continuous values (bbox / size ratios)
+  // so this stays as a strict 3-value enum.
+  text_layout_hint: 'single' | 'split' | 'top_banner';
   has_person: boolean;
   view_count_estimate: number | null;
 }
@@ -151,11 +156,17 @@ async function analyzeThumbnail(thumb: ThumbnailRow): Promise<{ ok: true; analys
    - "face_center_text_top" — 人臉居中、文字在上
    - "full_frame_overlay" — 文字疊在全景上方
 
-3. has_person：縮圖是否包含明顯的人臉/人物（boolean）
+3. text_layout_hint：以下三選一（v32 split-around-face 專用）
+   - "single"     — 文字是一塊（不管位置在哪，整段文字視覺上是一個 block）
+   - "split"      — 文字被拆成兩塊，分別在人物的左右兩側（影視颶風 Pattern A，例 iPhone | Air）
+   - "top_banner" — 文字橫貫畫面頂部、人物在下方
+   只回 enum 字串。判斷標準：能用一條「文字 → 人物 → 文字」的水平視線從左到右掃過，就是 "split"。
+
+4. has_person：縮圖是否包含明顯的人臉/人物（boolean）
    風景或純物件圖回 false。學習用樣本只要 has_person = true 的。
 
 只輸出 JSON，不要其他文字：
-{"style_description":"...","suggested_layout":"...","has_person":true}`;
+{"style_description":"...","suggested_layout":"...","text_layout_hint":"...","has_person":true}`;
 
   const body = {
     contents: [{
@@ -212,11 +223,20 @@ async function analyzeThumbnail(thumb: ThumbnailRow): Promise<{ ok: true; analys
     if (!parsed?.style_description || !parsed?.suggested_layout) {
       return { ok: false, error: `missing_fields: ${JSON.stringify(parsed).substring(0, 100)}` };
     }
+    // v32b: validate text_layout_hint enum, fall back to 'single' on
+    // missing/invalid values (Gemini sometimes hallucinates new enum
+    // values — 'single' is the safest fallback because it disables
+    // the new split renderer).
+    const validHints = new Set(['single', 'split', 'top_banner']);
+    const hint: 'single' | 'split' | 'top_banner' = validHints.has(parsed.text_layout_hint)
+      ? parsed.text_layout_hint
+      : 'single';
     return {
       ok: true,
       analysis: {
         style_description: parsed.style_description,
         suggested_layout: parsed.suggested_layout,
+        text_layout_hint: hint,
         has_person: parsed.has_person !== false,
         view_count_estimate: null,
       },
@@ -247,6 +267,7 @@ async function upsertReference(
     reference_image_b64: thumb.base64,
     style_description: analysis.style_description,
     suggested_layout: analysis.suggested_layout,
+    text_layout_hint: analysis.text_layout_hint,
     view_count: analysis.view_count_estimate,
     learned_at: new Date().toISOString(),
     weight: 1.0,
