@@ -385,20 +385,17 @@ function buildDesignPrompt(
   };
   const layoutLine = layoutInstruction[layoutType] || layoutInstruction.face_right_text_left;
 
-  // Karen 2026-04-07: strict 50/50 split. Person fills the right half
-  // (640px), text fills the left half (640px). Tell Gemini explicitly
-  // so it doesn't paint text across the full width.
-  const textArea = layoutType === 'face_left_text_right'
-    ? 'the RIGHT 50% of the canvas (pixels 640-1280)'
-    : layoutType === 'face_center_text_top'
-      ? 'the TOP 30% of the canvas, centered horizontally'
-      : 'the LEFT 50% of the canvas (pixels 0-640)';
+  // Karen 2026-04-07 v14 follow-up: person is now bottom-anchored at
+  // 65% height. Text MUST go in the top area (above the person) so it
+  // doesn't get covered. Person sits in the bottom-left, bottom-right,
+  // or bottom-center depending on layout.
+  const textArea = 'the TOP 35% of the canvas (pixels 0-252 in y-axis), spanning the full width or aligned opposite to the person';
 
-  const personArea = layoutType === 'face_left_text_right'
-    ? 'the LEFT 50% (pixels 0-640) — leave it as a clean simple region'
+  const personArea = layoutType === 'face_left_text_right' || layoutType === 'full_frame_overlay'
+    ? 'the BOTTOM-LEFT quadrant (x: 0-640, y: 252-720) — leave it as a clean simple region for the person photo'
     : layoutType === 'face_center_text_top'
-      ? 'the BOTTOM 70% center area — leave it as a clean simple region'
-      : 'the RIGHT 50% (pixels 640-1280) — leave it as a clean simple region';
+      ? 'the BOTTOM-CENTER area (x: 320-960, y: 252-720) — leave it as a clean simple region'
+      : 'the BOTTOM-RIGHT quadrant (x: 640-1280, y: 252-720) — leave it as a clean simple region for the person photo';
 
   return `Generate a YouTube thumbnail BACKGROUND image at 1280x720 pixels (16:9).
 
@@ -611,12 +608,17 @@ async function callGeminiImageMultiRef(
 /**
  * Determine person placement based on layout type.
  *
- * Karen 2026-04-07: previous values made the person tiny because compositeCandidate
- * used fit:'inside' on a 16:9 cutout, so width was the limiting dim and the
- * person filled only ~45% of the slot height. After analyzing 6 LKs/MrBeast
- * thumbnails, their people fill 60-100% of slot height with 35-70% slot width.
- * Bumped widths from 45% → 55% and switched composite to fit:'cover' so the
- * cutout fills the entire slot (cropping bottom of clothing if needed).
+ * Karen 2026-04-07 (v14 follow-up): person is now ALWAYS bottom-anchored
+ * and 65% height, leaving the top 35% for text. This eliminates the "hard
+ * cut at the bottom" issue from v14 — bottom-aligned cutouts blend more
+ * naturally because the slot bottom matches the canvas bottom and the
+ * additional bottom fade gradient (compositeCandidate) softens any seam.
+ *
+ * Layout horizontal positions:
+ *   - face_left_text_right  → person bottom-LEFT
+ *   - face_right_text_left  → person bottom-RIGHT
+ *   - face_center_text_top  → person bottom-CENTER
+ *   - full_frame_overlay    → same as face_left_text_right (default)
  */
 function getPersonPlacement(layoutType: string): {
   personWidth: number;
@@ -625,44 +627,70 @@ function getPersonPlacement(layoutType: string): {
   personY: number;
   gradientDirection: 'left' | 'right' | 'both';
 } {
+  const personWidth = Math.round(THUMBNAIL_WIDTH * 0.5);    // 640
+  const personHeight = Math.round(THUMBNAIL_HEIGHT * 0.65); // 468
+  const personY = THUMBNAIL_HEIGHT - personHeight;           // 252 (bottom-aligned)
+
   switch (layoutType) {
     case 'face_left_text_right':
+    case 'full_frame_overlay':
       return {
-        personWidth: Math.round(THUMBNAIL_WIDTH * 0.5),     // 640 — 50/50 split
-        personHeight: THUMBNAIL_HEIGHT,                       // 720
-        personX: 0,                                           // left edge
-        personY: 0,
+        personWidth,
+        personHeight,
+        personX: 0,                                           // bottom-left
+        personY,
         gradientDirection: 'right',
       };
 
     case 'face_center_text_top':
       return {
-        personWidth: Math.round(THUMBNAIL_WIDTH * 0.5),     // 640
-        personHeight: Math.round(THUMBNAIL_HEIGHT * 0.85),  // 612
-        personX: Math.round((THUMBNAIL_WIDTH - THUMBNAIL_WIDTH * 0.5) / 2),
-        personY: THUMBNAIL_HEIGHT - Math.round(THUMBNAIL_HEIGHT * 0.85),
+        personWidth,
+        personHeight,
+        personX: Math.round((THUMBNAIL_WIDTH - personWidth) / 2),
+        personY,
         gradientDirection: 'both',
-      };
-
-    case 'full_frame_overlay':
-      return {
-        personWidth: Math.round(THUMBNAIL_WIDTH * 0.5),     // 640
-        personHeight: THUMBNAIL_HEIGHT,                       // 720
-        personX: Math.round(THUMBNAIL_WIDTH * 0.5),          // right half
-        personY: 0,
-        gradientDirection: 'left',
       };
 
     case 'face_right_text_left':
     default:
       return {
-        personWidth: Math.round(THUMBNAIL_WIDTH * 0.5),     // 640
-        personHeight: THUMBNAIL_HEIGHT,                       // 720
-        personX: Math.round(THUMBNAIL_WIDTH * 0.5),          // right half
-        personY: 0,
+        personWidth,
+        personHeight,
+        personX: THUMBNAIL_WIDTH - personWidth,               // bottom-right
+        personY,
         gradientDirection: 'left',
       };
   }
+}
+
+/**
+ * Apply a vertical bottom-fade gradient to a PNG with alpha. The bottom
+ * `fadeRatio` of the image fades from full opacity to fully transparent,
+ * blending the cutout's hard bottom edge into the background underneath.
+ */
+async function applyBottomFade(pngBuffer: Buffer, fadeRatio = 0.25): Promise<Buffer> {
+  const { data, info } = await sharp(pngBuffer)
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const px = Buffer.from(data);
+  const w = info.width;
+  const h = info.height;
+  const fadeStart = Math.round(h * (1 - fadeRatio));
+
+  for (let y = fadeStart; y < h; y++) {
+    const t = (y - fadeStart) / (h - fadeStart);  // 0 at fadeStart, 1 at bottom
+    const alphaScale = 1 - t;                     // 1 at top of fade, 0 at bottom
+    for (let x = 0; x < w; x++) {
+      const idx = (y * w + x) * 4 + 3;            // alpha channel
+      px[idx] = Math.round(px[idx] * alphaScale);
+    }
+  }
+
+  return sharp(px, { raw: { width: w, height: h, channels: 4 } })
+    .png()
+    .toBuffer();
 }
 
 /**
@@ -793,7 +821,7 @@ async function compositeCandidate(
   // we use 'contain' so we don't double-zoom into just the head.
   const isHeadOnly = th < tw * 0.6;  // heuristic: torso would make it taller
 
-  const personResized = await sharp(trimmedCutout)
+  const personResizedRaw = await sharp(trimmedCutout)
     .resize(placement.personWidth, placement.personHeight, {
       fit: isHeadOnly ? 'contain' : 'cover',
       position: 'top',
@@ -802,7 +830,12 @@ async function compositeCandidate(
     .png()
     .toBuffer();
 
-  console.log(`[Thumbnail Generator] composite layout=${layoutType} trimmed=${tw}×${th} aspect=${trimmedAspect.toFixed(2)} slotAspect=${slotAspect.toFixed(2)} mode=${isHeadOnly ? 'contain' : 'cover'}`);
+  // Karen 2026-04-07 v14 follow-up: cutout had a hard bottom seam where
+  // the clothing was cut. Apply a vertical bottom-fade gradient to blend
+  // the bottom 25% into the background.
+  const personResized = await applyBottomFade(personResizedRaw, 0.25);
+
+  console.log(`[Thumbnail Generator] composite layout=${layoutType} trimmed=${tw}×${th} aspect=${trimmedAspect.toFixed(2)} slotAspect=${slotAspect.toFixed(2)} mode=${isHeadOnly ? 'contain' : 'cover'} bottomFade=0.25`);
 
   return sharp(designBackground)
     .composite([{
