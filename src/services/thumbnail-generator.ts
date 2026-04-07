@@ -763,6 +763,7 @@ interface PersonBBox {
 interface BuildOverlayOpts {
   layoutType: string;
   personBBox?: PersonBBox;            // v32b: actual cutout bbox in canvas space
+  emphasisDark?: boolean;             // v32c: true = safe to use yellow on emphasis block
 }
 
 function buildTextOverlaySvg(text: ThumbnailText, opts: BuildOverlayOpts): Buffer {
@@ -886,10 +887,13 @@ function buildSplitOverlaySvg(text: ThumbnailText, opts: BuildOverlayOpts): Buff
   // visual line is consistent across the figure.
   const shoulderY = Math.round(H * 0.42);
 
-  // Both blocks render in white. v32c (follow-up commit) adds the
-  // emphasis-yellow path with a background-luminance guard.
-  const primaryFill = '#FFFFFF';
-  const secondaryFill = '#FFFFFF';
+  // v32c: emphasis fill colour. Yellow only when the background under the
+  // emphasis block is dark enough (luminance check happens in caller →
+  // `emphasisDark`).
+  const yellow = '#FFD60A';
+  const white = '#FFFFFF';
+  const primaryFill = (text.emphasisOn === 'primary' && opts.emphasisDark) ? yellow : white;
+  const secondaryFill = (text.emphasisOn === 'secondary' && opts.emphasisDark) ? yellow : white;
 
   const renderBlock = (
     chars: string[],
@@ -1266,6 +1270,37 @@ async function colorMatchCutoutToBackground(cutoutPng: Buffer, bgRgb: { r: numbe
 }
 
 /**
+ * v32c: Sample the average luminance of a region in the background.
+ * Used to decide whether yellow emphasis text will be readable —
+ * yellow on bright backgrounds disappears, so we fall back to white
+ * unless the region's luminance is below 0.55.
+ */
+async function regionLuminance(
+  bg: Buffer,
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+): Promise<number> {
+  const safeLeft = Math.max(0, Math.min(left, THUMBNAIL_WIDTH - 1));
+  const safeTop = Math.max(0, Math.min(top, THUMBNAIL_HEIGHT - 1));
+  const safeW = Math.max(1, Math.min(width, THUMBNAIL_WIDTH - safeLeft));
+  const safeH = Math.max(1, Math.min(height, THUMBNAIL_HEIGHT - safeTop));
+  try {
+    const { channels } = await sharp(bg)
+      .extract({ left: safeLeft, top: safeTop, width: safeW, height: safeH })
+      .stats();
+    const r = channels[0].mean;
+    const g = channels[1].mean;
+    const b = channels[2].mean;
+    // Rec. 709 relative luminance, normalized 0-1.
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  } catch {
+    return 0.5;  // unknown — assume mid-tone (no yellow)
+  }
+}
+
+/**
  * Composite a pre-cut-out person (PNG with alpha) onto the design background.
  *
  * Karen 2026-04-07 v28 follow-up: cutout had visible "拼接感" because the
@@ -1366,9 +1401,27 @@ async function compositeCandidate(
     .png()
     .toBuffer();
 
+  // v32c: luminance check for emphasis colour. Sample the gutter that
+  // will hold the emphasis block, decide white vs yellow.
+  let emphasisDark = false;
+  if (layoutType === 'split_around_face' && thumbnailText.secondary && thumbnailText.emphasisOn) {
+    const sampleY = Math.round(THUMBNAIL_HEIGHT * 0.30);
+    const sampleH = Math.round(THUMBNAIL_HEIGHT * 0.30);
+    // emphasisOn=primary → primary lands on the right; emphasisOn=secondary → on the right too.
+    // Either way the block carrying emphasis is on the right side of the figure.
+    const sampleLeft = personBBox.right + 30;
+    const sampleW = THUMBNAIL_WIDTH - sampleLeft - 30;
+    if (sampleW > 20) {
+      const lum = await regionLuminance(withPerson, sampleLeft, sampleY, sampleW, sampleH);
+      emphasisDark = lum < 0.55;
+      console.log(`[Thumbnail Generator] emphasis luminance=${lum.toFixed(2)} → ${emphasisDark ? 'yellow' : 'white'}`);
+    }
+  }
+
   const textSvg = buildTextOverlaySvg(thumbnailText, {
     layoutType,
     personBBox,
+    emphasisDark,
   });
   return sharp(withPerson)
     .composite([{ input: textSvg, top: 0, left: 0 }])
