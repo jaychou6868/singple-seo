@@ -481,9 +481,13 @@ seoRoutes.get('/thumbnail/debug-imgly', async (c) => {
       '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAAAP/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AL+B/9k=',
       'base64',
     );
-    const inputBlob = new Blob([new Uint8Array(tinyJpeg)], { type: 'image/jpeg' });
+    // Zeabur might not have global Blob — explicitly import from node:buffer
+    const { Blob: NodeBlob } = await import('node:buffer');
+    const inputBlob = new NodeBlob([tinyJpeg], { type: 'image/jpeg' });
+    const blobType = (inputBlob as any).type;
+    const nodeVer = process.version;
     const t0 = Date.now();
-    const blob = await removeBackground(inputBlob, { model: 'medium' });
+    const blob = await removeBackground(inputBlob as any, { model: 'medium' });
     const elapsed = Date.now() - t0;
     const buf = Buffer.from(await blob.arrayBuffer());
     return c.json({
@@ -491,6 +495,8 @@ seoRoutes.get('/thumbnail/debug-imgly', async (c) => {
       elapsed_ms: elapsed,
       output_bytes: buf.length,
       cwd: process.cwd(),
+      blobType,
+      nodeVer,
     });
   } catch (err) {
     const e = err as any;
@@ -500,6 +506,7 @@ seoRoutes.get('/thumbnail/debug-imgly', async (c) => {
       stack: (e?.stack || '').split('\n').slice(0, 10).join('\n'),
       code: e?.code,
       cwd: process.cwd(),
+      nodeVer: process.version,
     }, 500);
   }
 });
