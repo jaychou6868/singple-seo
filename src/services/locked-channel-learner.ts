@@ -166,8 +166,10 @@ async function analyzeThumbnail(thumb: ThumbnailRow): Promise<{ ok: true; analys
     }],
     generationConfig: {
       temperature: 0.3,
-      maxOutputTokens: 1024,
-      thinkingConfig: { thinkingLevel: 'medium' },
+      // 1024 was getting truncated by thinking budget — Chinese descriptions
+      // take ~2 tokens per char and we need 4 fields. Bump to 4096 and skip
+      // thinking (analysis doesn't need deep reasoning).
+      maxOutputTokens: 4096,
     },
   };
 
@@ -236,7 +238,13 @@ async function upsertReference(
   // We avoid Supabase's .upsert(onConflict) because that requires a
   // non-partial unique index, and we want to keep the index partial
   // (so old enum rows with NULL video_id don't conflict).
+  //
+  // The original schema (thumbnail-tables.sql) declared layout_type,
+  // color_scheme, text_style, emotional_hook as NOT NULL — the generator
+  // no longer reads them, but the constraint still applies on insert.
+  // We pass placeholder strings to satisfy the NOT NULL.
   const row = {
+    // New schema columns (what the generator actually reads)
     video_id: thumb.videoId,
     channel_source: thumb.source,
     reference_image_b64: thumb.base64,
@@ -244,9 +252,12 @@ async function upsertReference(
     suggested_layout: analysis.suggested_layout,
     view_count: analysis.view_count_estimate,
     learned_at: new Date().toISOString(),
-    // Keep weight column populated for backward compat (the generator no
-    // longer reads enum columns but the row still needs a weight value)
     weight: 1.0,
+    // Legacy NOT NULL columns — placeholder values, never read by generator
+    layout_type: analysis.suggested_layout,
+    color_scheme: 'legacy',
+    text_style: 'legacy',
+    emotional_hook: 'legacy',
   };
 
   const { data: existing, error: selErr } = await supabase
