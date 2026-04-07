@@ -734,7 +734,9 @@ async function removeBackgroundFromFrame(personFrameBase64: string): Promise<Buf
   // producing empty mime → "Unsupported format" error. Wrap explicitly.
   // Use node:buffer Blob (not global) for cross-runtime safety on Zeabur.
   const { Blob: NodeBlob } = await import('node:buffer');
-  const inputBlob = new NodeBlob([downsized], { type: 'image/jpeg' });
+  // Convert Buffer to Uint8Array view to satisfy NodeBlob's BlobPart type
+  // (newer @types/node Buffer has a wider ArrayBufferLike that doesn't fit)
+  const inputBlob = new NodeBlob([new Uint8Array(downsized)], { type: 'image/jpeg' });
 
   const blob = await imglyRemoveBackground(inputBlob as any, {
     model: 'medium',
