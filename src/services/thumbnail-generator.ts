@@ -672,68 +672,41 @@ function getPersonPlacement(layoutType: string): {
 
 /**
  * Add a white outline (stroke) around the person cutout.
- * Karen 2026-04-07 v20 feedback: liked the white stroke around the
- * person from a previous version. Implements via alpha dilation:
- *   1. Read raw alpha
- *   2. Compute a dilated alpha mask (any pixel within `width` of an
- *      opaque pixel becomes opaque)
- *   3. Build a white image with the dilated mask as its alpha
- *   4. Composite original cutout on top of white-with-dilated-alpha
+ *
+ * Implementation: extract alpha → blur → threshold → use as the alpha
+ * channel of a white layer → composite original cutout on top. All
+ * heavy lifting is done by Sharp's C++ blur (vs slow JS pixel loops).
+ *
+ * The blur sigma controls the stroke width: sigma ~ stroke-radius / 2.
  */
-async function addWhiteStroke(cutoutPng: Buffer, strokeWidth = 8): Promise<Buffer> {
-  const { data, info } = await sharp(cutoutPng)
-    .ensureAlpha()
-    .raw()
-    .toBuffer({ resolveWithObject: true });
+async function addWhiteStroke(cutoutPng: Buffer, strokeRadius = 6): Promise<Buffer> {
+  const meta = await sharp(cutoutPng).metadata();
+  const w = meta.width || 1;
+  const h = meta.height || 1;
+  const sigma = Math.max(1, strokeRadius / 1.5);
 
-  const w = info.width;
-  const h = info.height;
-  const total = w * h;
-
-  // Build dilated alpha: pixel becomes opaque if any pixel within
-  // `strokeWidth` (Manhattan distance) is opaque. Use two-pass distance
-  // transform approximation: scan rows then cols.
-  const dilatedAlpha = new Uint8Array(total);
-  for (let i = 0; i < total; i++) {
-    dilatedAlpha[i] = data[i * 4 + 3] > 0 ? 255 : 0;
-  }
-  // Box dilation: for each opaque pixel mark neighbors within strokeWidth
-  // Simple approach: iterate strokeWidth times, each iteration marks
-  // neighbors of currently-opaque pixels.
-  const next = new Uint8Array(total);
-  for (let iter = 0; iter < strokeWidth; iter++) {
-    next.set(dilatedAlpha);
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const i = y * w + x;
-        if (dilatedAlpha[i] === 255) continue;
-        // Check 4 neighbors
-        if ((x > 0 && dilatedAlpha[i - 1] === 255) ||
-            (x < w - 1 && dilatedAlpha[i + 1] === 255) ||
-            (y > 0 && dilatedAlpha[i - w] === 255) ||
-            (y < h - 1 && dilatedAlpha[i + w] === 255)) {
-          next[i] = 255;
-        }
-      }
-    }
-    dilatedAlpha.set(next);
-  }
-
-  // Build a white RGBA layer with the dilated alpha
-  const whiteLayer = Buffer.alloc(total * 4);
-  for (let i = 0; i < total; i++) {
-    whiteLayer[i * 4]     = 255;
-    whiteLayer[i * 4 + 1] = 255;
-    whiteLayer[i * 4 + 2] = 255;
-    whiteLayer[i * 4 + 3] = dilatedAlpha[i];
-  }
-
-  const whiteLayerPng = await sharp(whiteLayer, { raw: { width: w, height: h, channels: 4 } })
+  // Extract alpha channel as grayscale, blur it (creates a halo), then
+  // threshold so the halo becomes opaque pixels at full alpha.
+  const dilatedAlphaPng = await sharp(cutoutPng)
+    .extractChannel('alpha')
+    .blur(sigma)
+    .threshold(40)
     .png()
     .toBuffer();
 
-  // Composite original cutout on top of white layer → person with stroke
-  return sharp(whiteLayerPng)
+  // Create a pure white layer at the same dimensions
+  const whiteLayer = await sharp({
+    create: { width: w, height: h, channels: 3, background: { r: 255, g: 255, b: 255 } },
+  }).png().toBuffer();
+
+  // Apply the dilated alpha mask to the white layer (joinChannel)
+  const whiteWithDilatedAlpha = await sharp(whiteLayer)
+    .joinChannel(dilatedAlphaPng)
+    .png()
+    .toBuffer();
+
+  // Composite original cutout on top of white-with-dilated-alpha
+  return sharp(whiteWithDilatedAlpha)
     .composite([{ input: cutoutPng, top: 0, left: 0, blend: 'over' }])
     .png()
     .toBuffer();
