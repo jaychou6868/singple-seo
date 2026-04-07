@@ -721,8 +721,12 @@ async function removeBackgroundFromFrame(personFrameBase64: string): Promise<Buf
   // through the body.
   const inputBuffer = Buffer.from(personFrameBase64, 'base64');
 
-  // imgly removeBackground accepts Blob | string | Buffer
-  const blob = await imglyRemoveBackground(inputBuffer, {
+  // imgly's Buffer→ImageData path tries to sniff mime type and throws
+  // "Unsupported format: <empty>" when sniffing fails (Karen 2026-04-07
+  // Zeabur production debug). Wrap as a Blob with explicit MIME.
+  const inputBlob = new Blob([new Uint8Array(inputBuffer)], { type: 'image/jpeg' });
+
+  const blob = await imglyRemoveBackground(inputBlob, {
     model: 'medium',
     output: { format: 'image/png', quality: 1 },
   });
