@@ -616,36 +616,38 @@ function getPersonPlacement(layoutType: string): {
   personY: number;
   resizePosition: string;
 } {
-  // Person over-fills the slot — width is 70% of canvas, height is 110%
-  // so the cutout naturally extends past the canvas top.
-  const personWidth = Math.round(THUMBNAIL_WIDTH * 0.7);    // 896
-  const personHeight = Math.round(THUMBNAIL_HEIGHT * 1.1);  // 792
+  // Karen 2026-04-07 v25: 70% width covered the text. Reduced to 50% so
+  // text and person each get half the canvas. Height extends 30 px past
+  // canvas top so the head naturally crops to the canvas edge (no
+  // floating effect).
+  const personWidth = Math.round(THUMBNAIL_WIDTH * 0.5);    // 640
+  const personHeight = THUMBNAIL_HEIGHT + 30;                // 750
 
   switch (layoutType) {
     case 'face_left_text_right':
     case 'full_frame_overlay':
-      // Person bottom-LEFT corner. Top extends past canvas top.
+      // Person bottom-LEFT, head extends slightly above canvas
       return {
         personWidth,
         personHeight,
         personX: 0,
-        personY: THUMBNAIL_HEIGHT - personHeight, // negative — extends above
+        personY: THUMBNAIL_HEIGHT - personHeight, // -30
         resizePosition: 'left top',
       };
 
     case 'face_center_text_top':
-      // Person bottom-CENTER, slightly narrower
+      // Person bottom-CENTER (text on top), slightly narrower
       return {
-        personWidth: Math.round(THUMBNAIL_WIDTH * 0.6),
+        personWidth: Math.round(THUMBNAIL_WIDTH * 0.45),
         personHeight,
-        personX: Math.round((THUMBNAIL_WIDTH - THUMBNAIL_WIDTH * 0.6) / 2),
+        personX: Math.round((THUMBNAIL_WIDTH - THUMBNAIL_WIDTH * 0.45) / 2),
         personY: THUMBNAIL_HEIGHT - personHeight,
         resizePosition: 'top',
       };
 
     case 'face_right_text_left':
     default:
-      // Person bottom-RIGHT corner. Top extends past canvas top.
+      // Person bottom-RIGHT, head extends slightly above canvas
       return {
         personWidth,
         personHeight,
