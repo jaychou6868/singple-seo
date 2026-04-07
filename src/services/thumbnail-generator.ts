@@ -518,7 +518,14 @@ async function callGeminiImageMultiRef(
 // ── Step 4: Composite with Sharp ───────────────────────────
 
 /**
- * Determine person placement based on layout type
+ * Determine person placement based on layout type.
+ *
+ * Karen 2026-04-07: previous values made the person tiny because compositeCandidate
+ * used fit:'inside' on a 16:9 cutout, so width was the limiting dim and the
+ * person filled only ~45% of the slot height. After analyzing 6 LKs/MrBeast
+ * thumbnails, their people fill 60-100% of slot height with 35-70% slot width.
+ * Bumped widths from 45% → 55% and switched composite to fit:'cover' so the
+ * cutout fills the entire slot (cropping bottom of clothing if needed).
  */
 function getPersonPlacement(layoutType: string): {
   personWidth: number;
@@ -530,39 +537,39 @@ function getPersonPlacement(layoutType: string): {
   switch (layoutType) {
     case 'face_left_text_right':
       return {
-        personWidth: Math.round(THUMBNAIL_WIDTH * 0.45),   // 576
-        personHeight: THUMBNAIL_HEIGHT,                      // 720
-        personX: 0,                                          // left edge
+        personWidth: Math.round(THUMBNAIL_WIDTH * 0.55),    // 704
+        personHeight: THUMBNAIL_HEIGHT,                       // 720
+        personX: 0,                                           // left edge
         personY: 0,
-        gradientDirection: 'right',                          // fade on right edge
+        gradientDirection: 'right',
       };
 
     case 'face_center_text_top':
       return {
-        personWidth: Math.round(THUMBNAIL_WIDTH * 0.5),     // 640
-        personHeight: Math.round(THUMBNAIL_HEIGHT * 0.8),   // 576
-        personX: Math.round((THUMBNAIL_WIDTH - THUMBNAIL_WIDTH * 0.5) / 2), // centered
-        personY: THUMBNAIL_HEIGHT - Math.round(THUMBNAIL_HEIGHT * 0.8),     // bottom-aligned
-        gradientDirection: 'both',                           // fade on both edges
+        personWidth: Math.round(THUMBNAIL_WIDTH * 0.55),    // 704
+        personHeight: Math.round(THUMBNAIL_HEIGHT * 0.85),  // 612
+        personX: Math.round((THUMBNAIL_WIDTH - THUMBNAIL_WIDTH * 0.55) / 2),
+        personY: THUMBNAIL_HEIGHT - Math.round(THUMBNAIL_HEIGHT * 0.85),
+        gradientDirection: 'both',
       };
 
     case 'full_frame_overlay':
       return {
-        personWidth: Math.round(THUMBNAIL_WIDTH * 0.45),    // 576
-        personHeight: THUMBNAIL_HEIGHT,                      // 720
-        personX: Math.round(THUMBNAIL_WIDTH * 0.55),        // right side
+        personWidth: Math.round(THUMBNAIL_WIDTH * 0.55),    // 704
+        personHeight: THUMBNAIL_HEIGHT,                       // 720
+        personX: Math.round(THUMBNAIL_WIDTH * 0.45),         // right side
         personY: 0,
-        gradientDirection: 'left',                           // fade on left edge
+        gradientDirection: 'left',
       };
 
     case 'face_right_text_left':
     default:
       return {
-        personWidth: Math.round(THUMBNAIL_WIDTH * 0.45),    // 576
-        personHeight: THUMBNAIL_HEIGHT,                      // 720
-        personX: Math.round(THUMBNAIL_WIDTH * 0.55),        // right side
+        personWidth: Math.round(THUMBNAIL_WIDTH * 0.55),    // 704
+        personHeight: THUMBNAIL_HEIGHT,                       // 720
+        personX: Math.round(THUMBNAIL_WIDTH * 0.45),         // right side
         personY: 0,
-        gradientDirection: 'left',                           // fade on left edge
+        gradientDirection: 'left',
       };
   }
 }
@@ -653,8 +660,11 @@ function selectBestFrame(frames: string[]): string {
 /**
  * Composite a pre-cut-out person (PNG with alpha) onto the design background.
  *
- * The person cutout is resized to fit the layout's slot using `fit: 'inside'`
- * so we don't crop hair/hands, then placed at the layout's anchor point.
+ * Karen 2026-04-07: switched from fit:'inside' (which made people tiny because
+ * 16:9 cutouts were width-limited) to fit:'cover' with position:'top'. Cover
+ * fills the entire slot, cropping the bottom of the cutout (clothing/waist)
+ * so the head and shoulders stay at full size. This matches MrBeast/LKs
+ * thumbnails where the head dominates the slot.
  */
 async function compositeCandidate(
   designBackground: Buffer,
@@ -663,40 +673,21 @@ async function compositeCandidate(
 ): Promise<Buffer> {
   const placement = getPersonPlacement(layoutType);
 
-  // Resize the cutout to fit within the layout slot, preserving aspect ratio.
-  // 'inside' means the result may be smaller in one dimension — we then anchor
-  // it so the person stays grounded within the slot. Beautify already happened
-  // upstream in beautifyPersonFrameSharp(), so no modulate/sharpen here.
+  // fit:'cover' + position:'top' fills the slot, cropping clothing bottom
+  // first while keeping the head/face fully visible.
   const personResized = await sharp(personCutoutPng)
     .resize(placement.personWidth, placement.personHeight, {
-      fit: 'inside',
-      withoutEnlargement: false,
+      fit: 'cover',
+      position: 'top',
     })
     .png()
     .toBuffer();
 
-  // Get the actual resized dimensions to compute the final anchor offset
-  const { width: rw = placement.personWidth, height: rh = placement.personHeight } =
-    await sharp(personResized).metadata();
-
-  // Anchor: bottom-aligned within the slot, horizontally aligned per layout
-  let left = placement.personX;
-  if (placement.gradientDirection === 'left') {
-    // person on right edge — push to the right of the slot
-    left = placement.personX + (placement.personWidth - rw);
-  } else if (placement.gradientDirection === 'both') {
-    // centered slot — center horizontally
-    left = placement.personX + Math.round((placement.personWidth - rw) / 2);
-  }
-  // gradientDirection 'right' = person on left edge → keep personX (already left edge)
-
-  const top = placement.personY + (placement.personHeight - rh);
-
   return sharp(designBackground)
     .composite([{
       input: personResized,
-      left,
-      top,
+      left: placement.personX,
+      top: placement.personY,
       blend: 'over',
     }])
     .jpeg({ quality: 92 })
