@@ -940,12 +940,76 @@ function selectBestFrame(frames: string[]): string {
 }
 
 /**
+ * Sample the dominant color of the background, return as { r, g, b }.
+ * Used to color-match the person cutout to the background lighting.
+ */
+async function sampleBackgroundColor(bgBuffer: Buffer): Promise<{ r: number; g: number; b: number }> {
+  // Sharp's stats() returns per-channel mean
+  const { channels } = await sharp(bgBuffer).stats();
+  return {
+    r: Math.round(channels[0].mean),
+    g: Math.round(channels[1].mean),
+    b: Math.round(channels[2].mean),
+  };
+}
+
+/**
+ * Compute the person cutout's average opaque color (skin/clothing tone)
+ * and return how much warm/cool tint to apply to match the background.
+ */
+async function colorMatchCutoutToBackground(cutoutPng: Buffer, bgRgb: { r: number; g: number; b: number }): Promise<Buffer> {
+  // Get cutout's average opaque color
+  const { data, info } = await sharp(cutoutPng).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  let rSum = 0, gSum = 0, bSum = 0, count = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] > 200) {
+      rSum += data[i];
+      gSum += data[i + 1];
+      bSum += data[i + 2];
+      count++;
+    }
+  }
+  if (count === 0) return cutoutPng;
+
+  const cutR = rSum / count;
+  const cutG = gSum / count;
+  const cutB = bSum / count;
+
+  // Compute warmth difference: positive = bg is warmer (more red/yellow)
+  // We blend ~25% of the difference into the cutout to match the bg lighting
+  // without losing the person's natural skin tone.
+  const blendStrength = 0.25;
+  const targetR = cutR + (bgRgb.r - cutR) * blendStrength;
+  const targetG = cutG + (bgRgb.g - cutG) * blendStrength;
+  const targetB = cutB + (bgRgb.b - cutB) * blendStrength;
+
+  // Convert to per-channel multipliers (avoid divide-by-zero)
+  const mulR = cutR > 5 ? targetR / cutR : 1;
+  const mulG = cutG > 5 ? targetG / cutG : 1;
+  const mulB = cutB > 5 ? targetB / cutB : 1;
+
+  // Apply per-channel scale to opaque pixels only (preserve alpha)
+  const px = Buffer.from(data);
+  for (let i = 0; i < px.length; i += 4) {
+    if (px[i + 3] > 0) {
+      px[i]     = Math.min(255, Math.round(px[i]     * mulR));
+      px[i + 1] = Math.min(255, Math.round(px[i + 1] * mulG));
+      px[i + 2] = Math.min(255, Math.round(px[i + 2] * mulB));
+    }
+  }
+
+  return sharp(px, { raw: { width: info.width, height: info.height, channels: 4 } })
+    .png()
+    .toBuffer();
+}
+
+/**
  * Composite a pre-cut-out person (PNG with alpha) onto the design background.
  *
- * Karen 2026-04-07 v26 (POC verified): use contain-fit so the person is
- * fully visible at native aspect ratio, then anchor to a canvas corner so
- * one edge of the cutout sits flush against the canvas edge (no floating,
- * no seam). Plus a white outline.
+ * Karen 2026-04-07 v28 follow-up: cutout had visible "拼接感" because the
+ * person was lit by their own room (cool/blue) while the background was
+ * warm studio lighting. Color-match the cutout to the background's
+ * dominant tone before compositing so they look like one scene.
  */
 async function compositeCandidate(
   designBackground: Buffer,
@@ -966,9 +1030,14 @@ async function compositeCandidate(
     trimmedCutout = personCutoutPng;
   }
 
+  // Sample background dominant color and shift cutout toward it
+  const bgRgb = await sampleBackgroundColor(designBackground);
+  const colorMatchedCutout = await colorMatchCutoutToBackground(trimmedCutout, bgRgb);
+  console.log(`[Thumbnail Generator] color match: bg=(${bgRgb.r},${bgRgb.g},${bgRgb.b})`);
+
   // Contain-fit: person is fully visible at native aspect ratio. Sharp
   // returns the actual content size (no padding) when fit='inside'.
-  const personResized = await sharp(trimmedCutout)
+  const personResized = await sharp(colorMatchedCutout)
     .resize(placement.personWidth, placement.personHeight, {
       fit: 'inside',
       withoutEnlargement: false,
