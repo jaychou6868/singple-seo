@@ -910,7 +910,7 @@ async function compositeCandidate(
 
   // Resize to over-fill the slot. Cover-fit + position keeps the head/face
   // in view while letting hair/shoulders extend past the canvas if needed.
-  const personResized = await sharp(trimmedCutout)
+  const personResizedFull = await sharp(trimmedCutout)
     .resize(placement.personWidth, placement.personHeight, {
       fit: 'cover',
       position: placement.resizePosition,
@@ -919,20 +919,37 @@ async function compositeCandidate(
     .png()
     .toBuffer();
 
+  // Sharp.composite doesn't accept negative top/left. Compute the
+  // visible region of the resized cutout that intersects the canvas
+  // and extract only that portion.
+  const cropLeft = Math.max(0, -placement.personX);
+  const cropTop = Math.max(0, -placement.personY);
+  const cropRight = Math.min(placement.personWidth, THUMBNAIL_WIDTH - placement.personX);
+  const cropBottom = Math.min(placement.personHeight, THUMBNAIL_HEIGHT - placement.personY);
+  const cropWidth = cropRight - cropLeft;
+  const cropHeight = cropBottom - cropTop;
+
+  const personVisible = (cropLeft > 0 || cropTop > 0 || cropWidth < placement.personWidth || cropHeight < placement.personHeight)
+    ? await sharp(personResizedFull)
+        .extract({ left: cropLeft, top: cropTop, width: cropWidth, height: cropHeight })
+        .png()
+        .toBuffer()
+    : personResizedFull;
+
+  const finalLeft = Math.max(0, placement.personX);
+  const finalTop = Math.max(0, placement.personY);
+
   // Karen 2026-04-07 v20 feedback: liked the white outline from previous
   // versions. Add a thick white stroke around the person silhouette.
-  const personWithStroke = await addWhiteStroke(personResized, 6);
+  const personWithStroke = await addWhiteStroke(personVisible, 6);
 
-  console.log(`[Thumbnail Generator] composite layout=${layoutType} slot=${placement.personWidth}×${placement.personHeight} pos=(${placement.personX},${placement.personY}) resize=${placement.resizePosition}`);
+  console.log(`[Thumbnail Generator] composite layout=${layoutType} slot=${placement.personWidth}×${placement.personHeight} pos=(${placement.personX},${placement.personY}) crop=${cropLeft},${cropTop},${cropWidth}×${cropHeight} final=(${finalLeft},${finalTop})`);
 
-  // Composite at the placement coordinates. personY may be negative
-  // (cutout extends above canvas top). Sharp's composite supports this
-  // and will crop the input where it extends past the canvas bounds.
   return sharp(designBackground)
     .composite([{
       input: personWithStroke,
-      left: placement.personX,
-      top: placement.personY,
+      left: finalLeft,
+      top: finalTop,
       blend: 'over',
     }])
     .jpeg({ quality: 92 })
