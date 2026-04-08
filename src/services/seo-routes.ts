@@ -562,7 +562,6 @@ seoRoutes.post('/thumbnail/smoke-test', async (c) => {
       title,
       videoSummary,
       videoType,
-      dryRun: true,
     });
 
     return c.json({
