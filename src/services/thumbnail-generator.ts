@@ -65,7 +65,6 @@ interface ReferencePattern {
   style_description: string;                 // Gemini's natural-language analysis
   suggested_layout: string;                  // face_left_text_right, etc.
   video_id: string | null;
-  text_layout_hint?: 'single' | 'split' | 'top_banner' | null;  // v32b
 }
 
 interface ThumbnailCandidate {
@@ -74,25 +73,6 @@ interface ThumbnailCandidate {
   thumbnailText: string;
   patternId: string | null;
   referenceVideoIds: string[];
-}
-
-// ── v32a: split-aware text structure ───────────────────────
-//
-// Karen 2026-04-07 (v32 影視颶風 Pattern A study): the most distinctive
-// 影視颶風 layout splits the title into a big primary keyword + a
-// smaller secondary modifier on the *opposite side of the figure*
-// (e.g. iPhone | Air, 鎖喉 | 真相). To support that we have to stop
-// treating the thumbnail title as a single string. ThumbnailText is
-// the new contract: every render flows through it, single-block titles
-// just leave secondary undefined and the renderer falls back to v31
-// behaviour.
-interface ThumbnailText {
-  primary: string;
-  secondary?: string;
-  // Which block carries the visual emphasis (yellow fill in v32c).
-  // 'primary' is the default; for 揭密型/痛點型 Sophia copy the
-  // secondary block is the punchline so emphasis flips to 'secondary'.
-  emphasisOn?: 'primary' | 'secondary';
 }
 
 interface ProgressCallback {
@@ -288,7 +268,7 @@ function pickWeightedNoDup<T extends { id: string; weight?: number | null }>(
 async function selectReferences(): Promise<ReferencePattern[]> {
   const { data: lks } = await supabase
     .from('seo_thumbnail_patterns')
-    .select('id, channel_source, reference_image_b64, style_description, suggested_layout, video_id, weight, text_layout_hint')
+    .select('id, channel_source, reference_image_b64, style_description, suggested_layout, video_id, weight')
     .eq('channel_source', 'lks')
     .not('reference_image_b64', 'is', null)
     .order('learned_at', { ascending: false })
@@ -296,7 +276,7 @@ async function selectReferences(): Promise<ReferencePattern[]> {
 
   const { data: mrbeast } = await supabase
     .from('seo_thumbnail_patterns')
-    .select('id, channel_source, reference_image_b64, style_description, suggested_layout, video_id, weight, text_layout_hint')
+    .select('id, channel_source, reference_image_b64, style_description, suggested_layout, video_id, weight')
     .eq('channel_source', 'mrbeast')
     .not('reference_image_b64', 'is', null)
     .order('learned_at', { ascending: false })
@@ -397,67 +377,6 @@ async function generateThumbnailTexts(
 
   console.warn('[Thumbnail Generator] Text generation returned unexpected format, using fallbacks');
   return ['鎖喉真相', '3 秒救嗓', '怕高音?'];
-}
-
-// ── v32b: Sophia 三句型自動拆字 ──────────────────────────
-//
-// Splits the 2-4 char thumbnail title into a primary + secondary block
-// based on which Sophia句型 it matches. The split decides where the
-// visual emphasis lands (揭密型 / 痛點型 → punchline is the second block;
-// 反差數字型 → number leads).
-//
-// Guards (from v32 adversarial review):
-//   - both blocks must have ≥1 char
-//   - block char-count ratio must be ≤ 2.5:1 (otherwise font sizes would
-//     blow out — single-block fallback is safer)
-//   - if no rule matches, fall through to a single block (v31 behaviour)
-function splitTitleByPattern(text: string): ThumbnailText {
-  const cleaned = text.replace(/\s/g, '');
-  const chars = [...cleaned];
-
-  // Too short to split — keep as single block.
-  if (chars.length < 3) return { primary: cleaned };
-
-  // Helper: build a split if it passes the ≤2.5 ratio guard.
-  const tryBuild = (
-    a: string,
-    b: string,
-    emphasisOn: 'primary' | 'secondary',
-  ): ThumbnailText | null => {
-    const al = [...a].length;
-    const bl = [...b].length;
-    if (al === 0 || bl === 0) return null;
-    const ratio = Math.max(al, bl) / Math.min(al, bl);
-    if (ratio > 2.5) return null;
-    return { primary: a, secondary: b, emphasisOn };
-  };
-
-  // 反差數字型: starts with digit(s) + 秒/分/招/天 → emphasis on number (primary)
-  const numMatch = cleaned.match(/^(\d+\s*[秒分招天日])(.+)$/);
-  if (numMatch) {
-    const split = tryBuild(numMatch[1].replace(/\s/g, ''), numMatch[2], 'primary');
-    if (split) return split;
-  }
-
-  // 痛點型: ends with '?' or '？' → split off the punctuation block,
-  // emphasis on the punchline (secondary)
-  const punctMatch = cleaned.match(/^(.+?)([^?？]*[?？])$/);
-  if (punctMatch && [...punctMatch[1]].length > 0 && [...punctMatch[2]].length > 0) {
-    const split = tryBuild(punctMatch[1], punctMatch[2], 'secondary');
-    if (split) return split;
-  }
-
-  // 揭密型 / 一般 4 字: split in half (2+2 or 2+3 etc.), emphasis on
-  // secondary (the reveal). The ratio guard above will reject 1+3 splits
-  // for very short titles.
-  const half = Math.ceil(chars.length / 2);
-  const firstHalf = chars.slice(0, half).join('');
-  const secondHalf = chars.slice(half).join('');
-  const split = tryBuild(firstHalf, secondHalf, 'secondary');
-  if (split) return split;
-
-  // Fall through: single block.
-  return { primary: cleaned };
 }
 
 // ── Step 3: Generate Design Backgrounds (few-shot from references) ──
@@ -710,20 +629,6 @@ function getPersonPlacement(layoutType: string): {
         resizePosition: 'top',
       };
 
-    case 'split_around_face': {
-      // v32b: 影視颶風 Pattern A — figure dead-center, text wraps both
-      // sides at shoulder height. Person slot is narrower (42%) than the
-      // top-banner case so primary/secondary blocks have real estate.
-      const w = Math.round(THUMBNAIL_WIDTH * 0.42);
-      return {
-        personWidth: w,
-        personHeight,
-        personX: Math.round((THUMBNAIL_WIDTH - w) / 2),
-        personY: 0,
-        resizePosition: 'top',
-      };
-    }
-
     case 'face_right_text_left':
     default:
       return {
@@ -736,62 +641,38 @@ function getPersonPlacement(layoutType: string): {
   }
 }
 
-// ── v32a/b/c: SVG text overlay ──────────────────────────────
-//
-// Karen 2026-04-07 v27: Gemini rendered text across full width every
-// time, so it always overlapped the person. Sharp/SVG renders the text
-// exactly where we want it.
-//
-// v32 changes:
-//   - Accepts ThumbnailText {primary, secondary?, emphasisOn?} instead of
-//     a single string. Single-block titles (secondary undefined) render
-//     identically to v31.
-//   - New layout `split_around_face` puts primary/secondary blocks at
-//     shoulder height on opposite sides of the actual person bbox.
-//   - emphasis block renders in #FFD60A yellow when the background under
-//     it is dark enough; otherwise falls back to white (luminance guard).
-
-const SPLIT_PERSON_BBOX_FALLBACK = { left: 540, right: 740, top: 0, bottom: THUMBNAIL_HEIGHT };
-
-interface PersonBBox {
-  left: number;
-  right: number;
-  top: number;
-  bottom: number;
-}
-
-interface BuildOverlayOpts {
-  layoutType: string;
-  personBBox?: PersonBBox;            // v32b: actual cutout bbox in canvas space
-  emphasisDark?: boolean;             // v32c: true = safe to use yellow on emphasis block
-}
-
-function buildTextOverlaySvg(text: ThumbnailText, opts: BuildOverlayOpts): Buffer {
+/**
+ * Render the thumbnail title as an SVG text overlay positioned in the
+ * half of the canvas opposite from the person. Pixel-perfect control
+ * (no Gemini randomness).
+ *
+ * Karen 2026-04-07 v27: Gemini rendered text across full width every
+ * time, so it always overlapped the person. Sharp/SVG renders the text
+ * exactly where we want it.
+ */
+function buildTextOverlaySvg(text: string, layoutType: string): Buffer {
   const W = THUMBNAIL_WIDTH;
   const H = THUMBNAIL_HEIGHT;
-  const { layoutType } = opts;
 
-  // ── v32b: split_around_face dual-block path ────────────────
-  if (layoutType === 'split_around_face' && text.secondary) {
-    return buildSplitOverlaySvg(text, opts);
-  }
-
-  // ── Single-block path (v31 behaviour, layout-aware area) ───
+  // Decide text area based on which side the person is on
   let textCenterX: number;
   let textWidth: number;
+  let textAlign: 'start' | 'middle' = 'middle';
   if (layoutType === 'face_left_text_right') {
+    // Person on LEFT → text on RIGHT half
     textCenterX = W * 0.75;        // 960 — center of right half
-    textWidth = W * 0.5 - 60;      // 580 px usable width
+    textWidth = W * 0.5 - 60;      // 580 px usable width (with padding)
   } else if (layoutType === 'face_center_text_top') {
+    // Person centered → text on TOP
     textCenterX = W / 2;
     textWidth = W * 0.9;
   } else {
     // face_right_text_left or default → person on RIGHT, text on LEFT
-    textCenterX = W * 0.25;
+    textCenterX = W * 0.25;        // 320 — center of left half
     textWidth = W * 0.5 - 60;
   }
 
-  const chars = [...text.primary];
+  const chars = [...text];
   const charCount = chars.length;
 
   // For 2-4 characters: render in 2x2 grid for max readability at small sizes
@@ -805,9 +686,11 @@ function buildTextOverlaySvg(text: ThumbnailText, opts: BuildOverlayOpts): Buffe
   } else if (charCount === 3) {
     lines = [[chars[0], chars[1]], [chars[2]]];
   } else {
+    // 4 chars in 2x2
     lines = [[chars[0], chars[1]], [chars[2], chars[3]]];
   }
 
+  // Compute font size: text fills ~80% of textWidth, divided by max chars per line
   const maxCharsPerLine = Math.max(...lines.map(l => l.length));
   const fontSize = Math.min(220, Math.round((textWidth * 0.85) / maxCharsPerLine));
   const lineHeight = Math.round(fontSize * 1.05);
@@ -826,124 +709,6 @@ function buildTextOverlaySvg(text: ThumbnailText, opts: BuildOverlayOpts): Buffe
     }
   }
 
-  return wrapSvg(W, H, fontSize, textElements.join('\n  '));
-}
-
-/**
- * v32b: Render primary + secondary blocks on opposite sides of the
- * person bbox at shoulder height.
- *
- * Routing rules (from v32 Party Mode round 14 + adversarial #9):
- *   - emphasisOn === 'primary'   → primary on the right (visual gravity)
- *   - emphasisOn === 'secondary' → primary on the left  (so secondary lands on the right)
- *   - undefined                  → primary on the left (deterministic default)
- *
- * The actual person bbox (from sharp.trim()) is used to find the empty
- * gutter widths on each side, NOT the placement container — this avoids
- * the v21-v25 floating-anchor class of bug (adversarial #2).
- */
-function buildSplitOverlaySvg(text: ThumbnailText, opts: BuildOverlayOpts): Buffer {
-  const W = THUMBNAIL_WIDTH;
-  const H = THUMBNAIL_HEIGHT;
-  const bbox = opts.personBBox ?? SPLIT_PERSON_BBOX_FALLBACK;
-
-  const padding = 30;
-  const leftGutterWidth = Math.max(0, bbox.left - padding);
-  const rightGutterWidth = Math.max(0, W - bbox.right - padding);
-
-  // Decide which block goes left vs right.
-  let primaryOnRight: boolean;
-  if (text.emphasisOn === 'primary') {
-    primaryOnRight = true;        // emphasis follows visual gravity (right)
-  } else if (text.emphasisOn === 'secondary') {
-    primaryOnRight = false;       // secondary (the punchline) on the right
-  } else {
-    primaryOnRight = false;       // default: primary leads (left)
-  }
-
-  const primaryGutter = primaryOnRight ? rightGutterWidth : leftGutterWidth;
-  const secondaryGutter = primaryOnRight ? leftGutterWidth : rightGutterWidth;
-  const primaryCenterX = primaryOnRight
-    ? bbox.right + padding + primaryGutter / 2
-    : padding + primaryGutter / 2;
-  const secondaryCenterX = primaryOnRight
-    ? padding + secondaryGutter / 2
-    : bbox.right + padding + secondaryGutter / 2;
-
-  // Font sizing — primary fills its gutter, secondary is 0.65x.
-  const primaryChars = [...text.primary];
-  const secondaryChars = [...(text.secondary || '')];
-
-  const primaryFontSize = Math.min(
-    240,
-    Math.max(
-      48,
-      Math.round((primaryGutter * 0.9) / Math.max(1, primaryChars.length)),
-    ),
-  );
-  const secondaryFontSize = Math.max(48, Math.round(primaryFontSize * 0.62));
-
-  // Vertical anchor: shoulder height ≈ 0.42 H. Both blocks share Y so the
-  // visual line is consistent across the figure.
-  const shoulderY = Math.round(H * 0.42);
-
-  // v32c: emphasis fill colour. Yellow only when the background under the
-  // emphasis block is dark enough (luminance check happens in caller →
-  // `emphasisDark`).
-  const yellow = '#FFD60A';
-  const white = '#FFFFFF';
-  const primaryFill = (text.emphasisOn === 'primary' && opts.emphasisDark) ? yellow : white;
-  const secondaryFill = (text.emphasisOn === 'secondary' && opts.emphasisDark) ? yellow : white;
-
-  const renderBlock = (
-    chars: string[],
-    centerX: number,
-    fontSize: number,
-    fill: string,
-    yOffset = 0,
-  ): string => {
-    if (chars.length === 0) return '';
-    // 1 char or 2 char: single line. ≥3: 2 per line, max 2 lines (rare for split).
-    const lines: string[][] = [];
-    if (chars.length <= 2) {
-      lines.push(chars);
-    } else {
-      lines.push(chars.slice(0, 2));
-      lines.push(chars.slice(2));
-    }
-    const lineHeight = Math.round(fontSize * 1.05);
-    const totalH = lines.length * lineHeight;
-    // Center each line vertically around shoulderY.
-    const startY = Math.round(shoulderY - totalH / 2 + fontSize * 0.85) + yOffset;
-    const els: string[] = [];
-    for (let li = 0; li < lines.length; li++) {
-      const line = lines[li];
-      const lineW = line.length * fontSize;
-      const lineStartX = Math.round(centerX - lineW / 2);
-      const y = startY + li * lineHeight;
-      for (let ci = 0; ci < line.length; ci++) {
-        const x = lineStartX + ci * fontSize;
-        els.push(
-          `<text x="${x}" y="${y}" font-size="${fontSize}" fill="${fill}" stroke="#000000" stroke-width="${Math.round(fontSize * 0.08)}" paint-order="stroke fill">${escapeXml(line[ci])}</text>`,
-        );
-      }
-    }
-    return els.join('\n  ');
-  };
-
-  const primarySvg = renderBlock(primaryChars, primaryCenterX, primaryFontSize, primaryFill);
-  const secondarySvg = renderBlock(secondaryChars, secondaryCenterX, secondaryFontSize, secondaryFill);
-
-  return wrapSvg(W, H, primaryFontSize, `${primarySvg}\n  ${secondarySvg}`);
-}
-
-/**
- * Build the wrapping <svg> with the bundled CJK font @font-face.
- * stroke-width is referenced from `defs` for the .t class used by
- * the single-block path; the split-block path inlines its own
- * stroke-width per text element.
- */
-function wrapSvg(width: number, height: number, defaultFontSize: number, body: string): Buffer {
   const fontFaceCss = CJK_FONT_BASE64
     ? `@font-face {
         font-family: 'NotoTC';
@@ -952,22 +717,22 @@ function wrapSvg(width: number, height: number, defaultFontSize: number, body: s
     : '';
 
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
-<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg" font-family="Noto Sans CJK TC, Noto Sans CJK SC, NotoTC, PingFang TC, sans-serif" font-weight="900">
+<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <style>
       ${fontFaceCss}
       .t {
         font-family: "Noto Sans CJK TC", "Noto Sans CJK SC", 'NotoTC', "PingFang TC", sans-serif;
-        font-size: ${defaultFontSize}px;
+        font-size: ${fontSize}px;
         font-weight: 900;
         fill: #ffffff;
         stroke: #000000;
-        stroke-width: ${Math.round(defaultFontSize * 0.08)};
+        stroke-width: ${Math.round(fontSize * 0.08)};
         paint-order: stroke fill;
       }
     </style>
   </defs>
-  ${body}
+  ${textElements.join('\n  ')}
 </svg>`;
 
   return Buffer.from(svg);
@@ -1270,54 +1035,18 @@ async function colorMatchCutoutToBackground(cutoutPng: Buffer, bgRgb: { r: numbe
 }
 
 /**
- * v32c: Sample the average luminance of a region in the background.
- * Used to decide whether yellow emphasis text will be readable —
- * yellow on bright backgrounds disappears, so we fall back to white
- * unless the region's luminance is below 0.55.
- */
-async function regionLuminance(
-  bg: Buffer,
-  left: number,
-  top: number,
-  width: number,
-  height: number,
-): Promise<number> {
-  const safeLeft = Math.max(0, Math.min(left, THUMBNAIL_WIDTH - 1));
-  const safeTop = Math.max(0, Math.min(top, THUMBNAIL_HEIGHT - 1));
-  const safeW = Math.max(1, Math.min(width, THUMBNAIL_WIDTH - safeLeft));
-  const safeH = Math.max(1, Math.min(height, THUMBNAIL_HEIGHT - safeTop));
-  try {
-    const { channels } = await sharp(bg)
-      .extract({ left: safeLeft, top: safeTop, width: safeW, height: safeH })
-      .stats();
-    const r = channels[0].mean;
-    const g = channels[1].mean;
-    const b = channels[2].mean;
-    // Rec. 709 relative luminance, normalized 0-1.
-    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
-  } catch {
-    return 0.5;  // unknown — assume mid-tone (no yellow)
-  }
-}
-
-/**
  * Composite a pre-cut-out person (PNG with alpha) onto the design background.
  *
  * Karen 2026-04-07 v28 follow-up: cutout had visible "拼接感" because the
  * person was lit by their own room (cool/blue) while the background was
  * warm studio lighting. Color-match the cutout to the background's
  * dominant tone before compositing so they look like one scene.
- *
- * v32: takes ThumbnailText (primary + optional secondary). For
- * split_around_face the actual person bbox is computed from the resized
- * cutout (not the placement container) so text anchors to real shoulder
- * edges, not invisible padding (adversarial review #2).
  */
 async function compositeCandidate(
   designBackground: Buffer,
   personCutoutPng: Buffer,
   layoutType: string,
-  thumbnailText: ThumbnailText,
+  thumbnailText: string,
 ): Promise<Buffer> {
   const placement = getPersonPlacement(layoutType);
 
@@ -1358,39 +1087,29 @@ async function compositeCandidate(
   switch (layoutType) {
     case 'face_left_text_right':
     case 'full_frame_overlay':
+      // Bottom-LEFT: cutout's left + bottom edges flush against canvas
       finalLeft = 0;
       finalTop = THUMBNAIL_HEIGHT - rh;
       break;
     case 'face_center_text_top':
-    case 'split_around_face':
-      // Bottom-CENTER for both centered layouts.
+      // Bottom-CENTER: cutout's bottom edge flush, horizontally centered
       finalLeft = Math.round((THUMBNAIL_WIDTH - rw) / 2);
       finalTop = THUMBNAIL_HEIGHT - rh;
       break;
     case 'face_right_text_left':
     default:
+      // Bottom-RIGHT: cutout's right + bottom edges flush against canvas
       finalLeft = THUMBNAIL_WIDTH - rw;
       finalTop = THUMBNAIL_HEIGHT - rh;
       break;
   }
 
-  // v32b: actual visible person bbox in canvas coordinates. The trim()
-  // above already removed transparent margins so resized cutout's
-  // (rw × rh) IS the visible person — finalLeft/finalTop give where it
-  // sits on the 1280×720 canvas.
-  const personBBox: PersonBBox = {
-    left: finalLeft,
-    right: finalLeft + rw,
-    top: finalTop,
-    bottom: finalTop + rh,
-  };
-
   // Karen 2026-04-07 v20 feedback: liked the white outline.
   const personWithStroke = await addWhiteStroke(personResized, 6);
 
-  console.log(`[Thumbnail Generator] composite layout=${layoutType} slot=${placement.personWidth}×${placement.personHeight} resized=${rw}×${rh} placed=(${finalLeft},${finalTop}) text=primary:${thumbnailText.primary}${thumbnailText.secondary ? '/' + thumbnailText.secondary : ''}`);
+  console.log(`[Thumbnail Generator] composite layout=${layoutType} slot=${placement.personWidth}×${placement.personHeight} resized=${rw}×${rh} placed=(${finalLeft},${finalTop})`);
 
-  // Composite person on background — text overlay goes on top after.
+  // Composite person on background, then SVG text overlay on top
   const withPerson = await sharp(designBackground)
     .composite([{
       input: personWithStroke,
@@ -1401,28 +1120,7 @@ async function compositeCandidate(
     .png()
     .toBuffer();
 
-  // v32c: luminance check for emphasis colour. Sample the gutter that
-  // will hold the emphasis block, decide white vs yellow.
-  let emphasisDark = false;
-  if (layoutType === 'split_around_face' && thumbnailText.secondary && thumbnailText.emphasisOn) {
-    const sampleY = Math.round(THUMBNAIL_HEIGHT * 0.30);
-    const sampleH = Math.round(THUMBNAIL_HEIGHT * 0.30);
-    // emphasisOn=primary → primary lands on the right; emphasisOn=secondary → on the right too.
-    // Either way the block carrying emphasis is on the right side of the figure.
-    const sampleLeft = personBBox.right + 30;
-    const sampleW = THUMBNAIL_WIDTH - sampleLeft - 30;
-    if (sampleW > 20) {
-      const lum = await regionLuminance(withPerson, sampleLeft, sampleY, sampleW, sampleH);
-      emphasisDark = lum < 0.55;
-      console.log(`[Thumbnail Generator] emphasis luminance=${lum.toFixed(2)} → ${emphasisDark ? 'yellow' : 'white'}`);
-    }
-  }
-
-  const textSvg = buildTextOverlaySvg(thumbnailText, {
-    layoutType,
-    personBBox,
-    emphasisDark,
-  });
+  const textSvg = buildTextOverlaySvg(thumbnailText, layoutType);
   return sharp(withPerson)
     .composite([{ input: textSvg, top: 0, left: 0 }])
     .jpeg({ quality: 92 })
@@ -1451,15 +1149,10 @@ export async function generateThumbnails(params: {
   videoSummary: string;    // Video analysis summary
   videoType: string;       // 'tutorial' | 'performance' | 'daily'
   sendProgress?: (progress: number, stage: string, detail: string) => void;
-  // v32: smoke-test path. When true, skip the seo_thumbnail_candidates
-  // INSERT (which would otherwise FK-fail without a real seo_jobs row)
-  // and skip the select-feedback weight bumps. Returns inline base64
-  // data URLs only.
-  dryRun?: boolean;
 }): Promise<{
   candidates: ThumbnailCandidate[];
 }> {
-  const { jobId, frames, title, videoSummary, videoType, sendProgress, dryRun } = params;
+  const { jobId, frames, title, videoSummary, videoType, sendProgress } = params;
   const progress = sendProgress || (() => {});
   const candidates: ThumbnailCandidate[] = [];
 
@@ -1535,25 +1228,14 @@ export async function generateThumbnails(params: {
     const designBackground = designResult.value;
 
     try {
-      // v32a/b: split the text into primary/secondary blocks via Sophia
-      // 三句型 patterns. Single-block titles fall through unchanged.
-      const thumbnailText = splitTitleByPattern(texts[i]);
-
-      // v32b: resolve final layout. When the reference hints split AND
-      // the title actually split into two blocks, force split_around_face
-      // (Pattern A 影視颶風). Otherwise honour the reference's
-      // suggested_layout from v31.
-      const referenceLayout = references[i].suggested_layout || 'face_right_text_left';
-      const wantsSplit = references[i].text_layout_hint === 'split';
-      const layoutType = (wantsSplit && thumbnailText.secondary)
-        ? 'split_around_face'
-        : referenceLayout;
-
+      // Composite — use the reference's suggested_layout for placement.
+      // Pass the text so SVG text overlay renders on top with pixel-perfect
+      // placement (Gemini no longer renders text at all).
       const composited = await compositeCandidate(
         designBackground,
         personCutoutPng,
-        layoutType,
-        thumbnailText,
+        references[i].suggested_layout || 'face_right_text_left',
+        texts[i],
       );
 
       // ── Step 5: Upload ──────────────────────────────────
@@ -1567,41 +1249,32 @@ export async function generateThumbnails(params: {
       // INSERT to seo_thumbnail_candidates so the select endpoint can
       // bump weights of all 3 references when Karen picks this candidate.
       // Without this row the select feedback loop is dead code.
-      // v32: dryRun (smoke test) skips this — there's no real seo_jobs
-      // row backing the FK and we don't want pollution.
-      let insertedId: string | undefined;
-      if (!dryRun) {
-        const { data: row, error: insErr } = await supabase
-          .from('seo_thumbnail_candidates')
-          .insert({
-            job_id: jobId,
-            image_url: imageUrl,
-            layout_type: layoutType,
-            thumbnail_text: texts[i],
-            text_primary: thumbnailText.primary,
-            text_secondary: thumbnailText.secondary ?? null,
-            text_layout_used: layoutType,
-            pattern_id: references[i].id,
-            reference_video_ids: referenceVideoIds,
-          })
-          .select('id')
-          .single();
+      const { data: row, error: insErr } = await supabase
+        .from('seo_thumbnail_candidates')
+        .insert({
+          job_id: jobId,
+          image_url: imageUrl,
+          layout_type: references[i].suggested_layout,
+          thumbnail_text: texts[i],
+          pattern_id: references[i].id,
+          reference_video_ids: referenceVideoIds,
+        })
+        .select('id')
+        .single();
 
-        if (insErr) {
-          console.error(`[Thumbnail Generator] Insert candidate #${i} failed:`, insErr);
-        }
-        insertedId = row?.id;
+      if (insErr) {
+        console.error(`[Thumbnail Generator] Insert candidate #${i} failed:`, insErr);
       }
 
       candidates.push({
-        id: insertedId,
+        id: row?.id,
         imageUrl,
         thumbnailText: texts[i],
         patternId: references[i].id,
         referenceVideoIds,
       });
 
-      console.log(`[Thumbnail Generator] Candidate #${i} complete (layout=${layoutType}, dryRun=${!!dryRun})`);
+      console.log(`[Thumbnail Generator] Candidate #${i} complete: ${imageUrl} (id=${row?.id})`);
     } catch (err) {
       const msg = err instanceof Error ? `${err.message}\n${(err.stack || '').split('\n').slice(0, 5).join('\n')}` : String(err);
       console.error(`[Thumbnail Generator] Candidate #${i} composite/upload failed:`, msg);
