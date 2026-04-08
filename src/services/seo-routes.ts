@@ -591,13 +591,12 @@ seoRoutes.post('/thumbnail/learn', async (c) => {
     console.warn('[Locked Learner] ADMIN_KEY env var not set — endpoint is unprotected');
   }
 
-  try {
-    const result = await runLockedChannelLearner();
-    return c.json({ ok: true, ...result });
-  } catch (err) {
-    console.error('Locked-channel learner error:', err);
-    return c.json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
-  }
+  // Fire-and-forget — learner takes ~5-7 min, exceeds Zeabur's 100s proxy
+  // timeout if awaited. Return 202 immediately; check Zeabur logs for result.
+  runLockedChannelLearner().catch(err => {
+    console.error('Locked-channel learner manual trigger failed:', err);
+  });
+  return c.json({ ok: true, status: 'started', message: 'Learner running in background (~5-7 min). Check Zeabur logs for completion.' }, 202);
 });
 
 // ── Thumbnail: Get candidates ─────────────────────────────
