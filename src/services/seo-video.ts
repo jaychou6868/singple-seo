@@ -645,14 +645,16 @@ export async function processVideoSeo(
   const content = result.transcript;
   const videoAnalysis: string | null = result.analysis;
 
-  // Generate SEO caption + YouTube titles + thumbnail timestamps IN PARALLEL
-  await updateJobProgress(jobId, 45, 'generating_caption', '並行生成 SEO 文案 + YouTube 標題 + 封面分析...', onProgress);
+  // Generate SEO caption + YouTube titles IN PARALLEL
+  // Thumbnail timestamps only for long videos (duration > 60s)
+  const isLongVideo = job.video_type === 'long';
+  await updateJobProgress(jobId, 45, 'generating_caption', '並行生成 SEO 文案 + YouTube 標題' + (isLongVideo ? ' + 封面分析' : '') + '...', onProgress);
   const [captionRaw, titlesRaw, thumbnailTimestamps] = await Promise.all([
     generateSeoCaption(content, description, videoAnalysis),
     generateYouTubeTitles(content, {} as any, videoAnalysis),
-    extractThumbnailTimestamps(result.fileUri),
+    isLongVideo ? extractThumbnailTimestamps(result.fileUri) : Promise.resolve([]),
   ]);
-  console.log(`[SEO] Thumbnail timestamps: ${JSON.stringify(thumbnailTimestamps)}`);
+  console.log(`[SEO] isLongVideo=${isLongVideo}, thumbnail timestamps: ${JSON.stringify(thumbnailTimestamps)}`);
   let caption = captionRaw;
   if (!caption) throw new Error('SEO caption generation failed');
   caption.source_model = 'gemini-3.1-pro';

@@ -412,6 +412,12 @@ seoRoutes.post('/thumbnail/generate', async (c) => {
       return f;
     });
 
+    // Only generate thumbnails for long videos (duration > 60s)
+    const { data: job } = await supabase.from('seo_jobs').select('video_type').eq('id', jobId).single();
+    if (job?.video_type !== 'long') {
+      return c.json({ ok: true, candidates: [], skipped: true, reason: 'short video — thumbnails only for long videos (>1 min)' });
+    }
+
     // Run thumbnail generation (async, returns when done)
     const result = await generateThumbnails({
       jobId,
