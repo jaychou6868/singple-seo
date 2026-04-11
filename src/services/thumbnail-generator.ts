@@ -19,6 +19,7 @@ import { fileURLToPath } from 'url';
 import { createClient } from '@supabase/supabase-js';
 import { removeBackground as imglyRemoveBackground } from '@imgly/background-removal-node';
 import { beautifyFace } from './face-beautify.js';
+import { preHint } from './nlp_kb_client.js';
 
 // ── Bundled font ─────────────────────────────────────────────
 //
@@ -321,10 +322,22 @@ async function generateThumbnailTexts(
   videoSummary: string,
   videoType: string,
 ): Promise<string[]> {
+  // NLP KB pre-generation hint (feature flagged, returns null when off)
+  let _nlpHintBlock = '';
+  try {
+    const _hint = await preHint(title || videoSummary.substring(0, 120), 'YouTube 縮圖大字短語');
+    if (_hint) {
+      _nlpHintBlock = `\n## 🧠 NLP 技巧建議（融入短語，不要直接引用術語）\n${_hint}\n`;
+    }
+  } catch (e) {
+    console.warn('[nlp_kb] preHint (thumbnail) failed:', (e as Error).message);
+  }
+
   const systemPrompt = `你是 YouTube 縮圖文字大師，專為「簡單歌唱 Singple.」這個歌唱教學頻道寫縮圖上的對峙式大字。風格參考影視颶風與 MrBeast — 短、有力、製造對峙感，但保留歌唱教學頻道該有的溫度（不要威脅式罵人）。`;
 
   const prompt = `## 任務
 為這支歌唱教學影片生成 3 個縮圖大字短語，分屬三種句型。
+${_nlpHintBlock}
 
 ## 鐵律
 1. **2-4 個中文字**（4 字是極限，多 1 字就 reject）

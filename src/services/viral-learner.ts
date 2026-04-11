@@ -10,6 +10,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { nanoid } from 'nanoid';
+import { extractPatterns } from './nlp_kb_client.js';
 
 // ── Config ──────────────────────────────────────────────────
 
@@ -503,6 +504,25 @@ export async function runViralLearner(): Promise<WeeklyReport> {
   }));
   const analyses = await analyzeWithGemini(titlesForAnalysis);
   console.log(`[Viral Learner] Analyses completed: ${analyses.length}`);
+
+  // NLP KB pattern extraction (feature flagged, returns null when off)
+  try {
+    const _sourceTitles = titlesForAnalysis
+      .map((t, i) => `${i + 1}. ${t.title} (${t.views} views, ${t.ratio}x)`)
+      .join('\n');
+    const _patterns = await extractPatterns(_sourceTitles, '爆款短影音');
+    if (_patterns) {
+      console.log(
+        `[nlp_kb] viral patterns extracted (${_patterns.academicAnswer.length} academic / ${_patterns.karenHint.length} karen hint chars)`,
+      );
+      for (const a of analyses) {
+        (a as any).nlp_framework_analysis = _patterns.academicAnswer;
+        (a as any).nlp_karen_hint = _patterns.karenHint;
+      }
+    }
+  } catch (e) {
+    console.warn('[nlp_kb] extractPatterns (viral-learner) failed:', (e as Error).message);
+  }
 
   // 4. Update knowledge base
   const { newPatterns, updatedSkeletons } = await updateKnowledgeBase(analyses, overperformers);

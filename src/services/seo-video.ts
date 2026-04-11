@@ -13,6 +13,7 @@ import { GoogleAuth } from 'google-auth-library';
 import { createClient } from '@supabase/supabase-js';
 import { selectDiverseSkeletons, buildDiversityConstraint, getRecentDNA, recordDNA } from './dna-tracker.js';
 import type { CaptionDNA } from './dna-tracker.js';
+import { preHint, postReview } from './nlp_kb_client.js';
 
 // ── Config ──────────────────────────────────────────────────
 
@@ -388,7 +389,23 @@ async function nlpCaptionReview(
   caption: Record<string, unknown>,
   content: string,
 ): Promise<Record<string, unknown>> {
+  // NLP KB post-generation review hint (feature flagged, returns null when off)
+  let _nlpReviewBlock = '';
+  try {
+    const _captionText = (caption.full_caption as string)
+      || (caption.hook as string)
+      || JSON.stringify(caption);
+    const _review = await postReview(_captionText, 'IG SEO 文案');
+    if (_review) {
+      console.log('[nlp_kb] caption review hint:', _review.substring(0, 200));
+      _nlpReviewBlock = `\n\n## 🧠 NLP KB 額外審稿建議（融入修改，不要複製）\n${_review}\n`;
+    }
+  } catch (e) {
+    console.warn('[nlp_kb] postReview (caption) failed:', (e as Error).message);
+  }
+
   const prompt = `你是 NLP 神經語言學行銷專家。審核以下 IG SEO 文案，用 NLP 技巧強化說服力。
+${_nlpReviewBlock}
 
 ## 審核重點
 1. Hook 有沒有封閉性？
@@ -464,7 +481,22 @@ async function generateYouTubeTitles(
     .map((t: any) => `[${t.angle}+${t.skeleton_id}] ${t.title}`)
     .join('\n') || '（無）';
 
+  // NLP KB pre-generation hint (feature flagged, returns null when off)
+  let _nlpHintBlock = '';
+  try {
+    const _topicHint = (caption.hook as string)
+      || content.substring(0, 200)
+      || 'YouTube 標題';
+    const _hint = await preHint(_topicHint, 'YouTube 標題生成');
+    if (_hint) {
+      _nlpHintBlock = `\n\n## 🧠 NLP 技巧建議（融入標題設計，不要直接引用術語）\n${_hint}\n`;
+    }
+  } catch (e) {
+    console.warn('[nlp_kb] preHint (YT titles) failed:', (e as Error).message);
+  }
+
   const prompt = `你是「簡單歌唱 Singple.」的 YouTube 標題專家。目標：讓陌生人停下來點擊。
+${_nlpHintBlock}
 
 ## 任務
 生成 5 個 YouTube 標題候選。
@@ -511,7 +543,21 @@ async function nlpTitleReview(
   titles: Record<string, unknown>[],
   content: string,
 ): Promise<Record<string, unknown>[]> {
+  // NLP KB post-generation review hint (feature flagged, returns null when off)
+  let _nlpReviewBlock = '';
+  try {
+    const _titlesText = titles.map((t) => `- ${(t.title as string) || ''}`).join('\n');
+    const _review = await postReview(_titlesText, 'YouTube 標題');
+    if (_review) {
+      console.log('[nlp_kb] titles review hint:', _review.substring(0, 200));
+      _nlpReviewBlock = `\n\n## 🧠 NLP KB 額外審稿建議（參考並融入判斷，不要直接複製）\n${_review}\n`;
+    }
+  } catch (e) {
+    console.warn('[nlp_kb] postReview (titles) failed:', (e as Error).message);
+  }
+
   const prompt = `你是 YouTube 標題 NLP 審核專家。逐一審核以下 ${titles.length} 個標題。
+${_nlpReviewBlock}
 
 ## 審核維度
 A. 內容一致性（標題承諾 ≤ 內容實際教的）
