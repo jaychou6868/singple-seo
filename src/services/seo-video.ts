@@ -703,7 +703,7 @@ export async function processVideoSeo(
   console.log(`[SEO] isLongVideo=${isLongVideo}, thumbnail timestamps: ${JSON.stringify(thumbnailTimestamps)}`);
   let caption = captionRaw;
   if (!caption) throw new Error('SEO caption generation failed');
-  caption.source_model = 'gemini-3.1-pro';
+  caption.source_model = 'gemini-3.5-flash';
   let titles = titlesRaw || [];
 
   // NLP review caption + titles IN PARALLEL
@@ -759,7 +759,7 @@ export async function processVideoSeo(
     caption: caption,
     titles: titles,
     episode_number: episodeNumber,
-    model_used: 'gemini-3.1-pro',
+    model_used: 'gemini-3.5-flash',
     video_type: job.video_type || 'auto',
     updated_at: new Date().toISOString(),
   }).eq('id', jobId);
