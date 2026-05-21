@@ -26,7 +26,7 @@ const YOUTUBE_CHANNEL_ID = 'UCo3Z0bh4OnwPL5z4rMwNqbg';
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
-const GEMINI_MODEL = 'gemini-3.1-pro-preview';
+const GEMINI_MODEL = 'gemini-3.5-flash';
 
 // ── Clients ─────────────────────────────────────────────────
 
@@ -271,7 +271,7 @@ export async function extractThumbnailTimestamps(
         generationConfig: {
           temperature: 0.5,
           maxOutputTokens: 2048,
-          thinkingConfig: { thinkingLevel: 'medium' },
+          thinkingConfig: { thinkingLevel: 'high' },
         },
       }),
     }).then(r => r.json() as Promise<any>);

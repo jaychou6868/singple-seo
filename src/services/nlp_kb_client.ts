@@ -749,7 +749,7 @@ export async function academicToKaren(
     // Model routing: Zeabur 端沒有 Opus 可用，直接用 Gemini 3.1 Pro Preview
     // （對齊 Karen 的 feedback_model_routing.md fallback 層）
     const r = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent`,
       {
         method: 'POST',
         headers: {
@@ -763,7 +763,7 @@ export async function academicToKaren(
             temperature: 0.3,
             maxOutputTokens: 2048,
             // Gemini 3.1 Pro Preview 支援 thinking，用 medium 比 Flash 的 0 好
-            thinkingConfig: { thinkingLevel: 'medium' },
+            thinkingConfig: { thinkingLevel: 'high' },
           },
         }),
         signal: ctrl.signal,
