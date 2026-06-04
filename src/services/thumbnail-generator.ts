@@ -20,6 +20,7 @@ import { createClient } from '@supabase/supabase-js';
 import { removeBackground as imglyRemoveBackground } from '@imgly/background-removal-node';
 import { beautifyFace } from './face-beautify.js';
 import { preHint } from './nlp_kb_client.js';
+import { reportUsage } from './usage-reporter.js';
 
 // ── Bundled font ─────────────────────────────────────────────
 //
@@ -154,6 +155,19 @@ async function callGeminiText(prompt: string, systemPrompt?: string): Promise<st
     });
 
     const data = await res.json() as Record<string, any>;
+
+    // Report AI usage (fire-and-forget) for the thumbnail text-generation call.
+    const um = data?.usageMetadata;
+    if (um) {
+      reportUsage({
+        feature: 'thumbnail-text',
+        provider: 'gemini',
+        model: GEMINI_MODEL,
+        promptTokens: um.promptTokenCount,
+        completionTokens: (um.candidatesTokenCount ?? 0) + (um.thoughtsTokenCount ?? 0),
+      });
+    }
+
     const parts = data?.candidates?.[0]?.content?.parts || [];
     for (let i = parts.length - 1; i >= 0; i--) {
       if (parts[i].text) return parts[i].text;
@@ -579,7 +593,17 @@ async function callGeminiImageMultiRef(
     const data = await res.json() as Record<string, any>;
     const respParts = data?.candidates?.[0]?.content?.parts || [];
     for (const p of respParts) {
-      if (p.inlineData?.data) return p.inlineData.data;
+      if (p.inlineData?.data) {
+        // Image generation is billed per image, not per token — report
+        // one image per successful generation (do not rely on usageMetadata).
+        reportUsage({
+          feature: 'thumbnail-image',
+          provider: 'gemini',
+          model: GEMINI_MODEL_PRO,
+          images: 1,
+        });
+        return p.inlineData.data;
+      }
     }
     throw new Error(`Gemini multi-ref returned no image: ${JSON.stringify(data).substring(0, 300)}`);
   } finally {

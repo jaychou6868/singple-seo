@@ -18,6 +18,7 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
+import { reportUsage } from './usage-reporter.js';
 
 // ── Config ──────────────────────────────────────────────────
 
@@ -185,6 +186,19 @@ async function analyzeThumbnail(thumb: ThumbnailRow): Promise<{ ok: true; analys
       console.warn(`[Locked Learner] Gemini error for ${thumb.videoId}: ${msg}`);
       return { ok: false, error: `gemini_error: ${msg}` };
     }
+
+    // Report AI usage (fire-and-forget).
+    const um = data?.usageMetadata;
+    if (um) {
+      reportUsage({
+        feature: 'locked-channel',
+        provider: 'gemini',
+        model: GEMINI_MODEL,
+        promptTokens: um.promptTokenCount,
+        completionTokens: (um.candidatesTokenCount ?? 0) + (um.thoughtsTokenCount ?? 0),
+      });
+    }
+
     const parts = data?.candidates?.[0]?.content?.parts || [];
     let text = '';
     for (let i = parts.length - 1; i >= 0; i--) {

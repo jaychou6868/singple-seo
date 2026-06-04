@@ -11,6 +11,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { nanoid } from 'nanoid';
 import { extractPatterns } from './nlp_kb_client.js';
+import { reportUsage } from './usage-reporter.js';
 
 // ── Config ──────────────────────────────────────────────────
 
@@ -250,6 +251,19 @@ ${titlesText}
     });
 
     const data = await res.json() as any;
+
+    // Report AI usage (fire-and-forget).
+    const um = data?.usageMetadata;
+    if (um) {
+      reportUsage({
+        feature: 'viral-learner',
+        provider: 'gemini',
+        model: GEMINI_MODEL,
+        promptTokens: um.promptTokenCount,
+        completionTokens: (um.candidatesTokenCount ?? 0) + (um.thoughtsTokenCount ?? 0),
+      });
+    }
+
     const parts = data?.candidates?.[0]?.content?.parts || [];
     let text = '';
     for (let i = parts.length - 1; i >= 0; i--) {

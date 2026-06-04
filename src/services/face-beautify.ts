@@ -21,6 +21,7 @@
  */
 
 import sharp from 'sharp';
+import { reportUsage } from './usage-reporter.js';
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_MODEL = 'gemini-3.5-flash';
@@ -84,6 +85,19 @@ face_box 涵蓋整個臉部含下巴額頭。五官 box 要緊貼但不要切到
       console.warn('[Beautify] Gemini bbox error:', JSON.stringify(data.error).substring(0, 200));
       return null;
     }
+
+    // Report AI usage (fire-and-forget) for the face-detection call.
+    const um = data?.usageMetadata;
+    if (um) {
+      reportUsage({
+        feature: 'face-beautify',
+        provider: 'gemini',
+        model: GEMINI_MODEL,
+        promptTokens: um.promptTokenCount,
+        completionTokens: (um.candidatesTokenCount ?? 0) + (um.thoughtsTokenCount ?? 0),
+      });
+    }
+
     const parts = data?.candidates?.[0]?.content?.parts || [];
     let text = '';
     for (let i = parts.length - 1; i >= 0; i--) {

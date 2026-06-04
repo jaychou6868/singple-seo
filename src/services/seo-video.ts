@@ -14,6 +14,7 @@ import { createClient } from '@supabase/supabase-js';
 import { selectDiverseSkeletons, buildDiversityConstraint, getRecentDNA, recordDNA } from './dna-tracker.js';
 import type { CaptionDNA } from './dna-tracker.js';
 import { preHint, postReview } from './nlp_kb_client.js';
+import { reportUsage } from './usage-reporter.js';
 
 // ── Config ──────────────────────────────────────────────────
 
@@ -92,7 +93,7 @@ export async function deleteGcsObject(gcsUri: string): Promise<void> {
 
 // ── Gemini API ──────────────────────────────────────────────
 
-async function callGemini(prompt: string, systemPrompt?: string): Promise<string> {
+async function callGemini(prompt: string, systemPrompt?: string, feature = 'seo-video'): Promise<string> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
   const payload: Record<string, unknown> = {
@@ -120,6 +121,20 @@ async function callGemini(prompt: string, systemPrompt?: string): Promise<string
     });
 
     const data = await res.json() as Record<string, any>;
+
+    // Report AI usage (fire-and-forget). usageMetadata is on the response root.
+    const um = data?.usageMetadata;
+    if (um) {
+      reportUsage({
+        feature,
+        provider: 'gemini',
+        model: GEMINI_MODEL,
+        promptTokens: um.promptTokenCount,
+        // Gemini completion = candidates + thinking tokens (when present).
+        completionTokens: (um.candidatesTokenCount ?? 0) + (um.thoughtsTokenCount ?? 0),
+      });
+    }
+
     const parts = data?.candidates?.[0]?.content?.parts || [];
     for (let i = parts.length - 1; i >= 0; i--) {
       if (parts[i].text) return parts[i].text;
@@ -223,6 +238,18 @@ async function analyzeVideoWithGemini(
     }),
   }).then(r => r.json() as Promise<any>);
 
+  // Report AI usage (fire-and-forget) for the standalone video-analysis call.
+  const analysisUm = analysisData?.usageMetadata;
+  if (analysisUm) {
+    reportUsage({
+      feature: 'seo-video',
+      provider: 'gemini',
+      model: GEMINI_MODEL,
+      promptTokens: analysisUm.promptTokenCount,
+      completionTokens: (analysisUm.candidatesTokenCount ?? 0) + (analysisUm.thoughtsTokenCount ?? 0),
+    });
+  }
+
   const transcript = '';
   const analysisParts = analysisData?.candidates?.[0]?.content?.parts || [];
   let analysisText = '';
@@ -279,6 +306,18 @@ export async function extractThumbnailTimestamps(
     if (res?.error) {
       console.error('[SEO] Thumbnail timestamps Gemini error:', JSON.stringify(res.error).substring(0, 500));
       return [];
+    }
+
+    // Report AI usage (fire-and-forget) for the standalone thumbnail-timestamps call.
+    const tsUm = res?.usageMetadata;
+    if (tsUm) {
+      reportUsage({
+        feature: 'seo-video',
+        provider: 'gemini',
+        model: GEMINI_MODEL,
+        promptTokens: tsUm.promptTokenCount,
+        completionTokens: (tsUm.candidatesTokenCount ?? 0) + (tsUm.thoughtsTokenCount ?? 0),
+      });
     }
 
     const parts = res?.candidates?.[0]?.content?.parts || [];
@@ -379,7 +418,7 @@ ${videoAnalysis ? `## 影片分析\n${videoAnalysis.substring(0, 1000)}` : ''}
 
 ${description ? `## 描述\n${description}` : ''}`;
 
-  const raw = await callGemini(userPrompt, systemPrompt);
+  const raw = await callGemini(userPrompt, systemPrompt, 'seo-video');
   return parseJsonResponse(raw);
 }
 
@@ -429,7 +468,7 @@ ${content.substring(0, 500)}
   "suggestions": "改進建議"
 }`;
 
-  const raw = await callGemini(prompt);
+  const raw = await callGemini(prompt, undefined, 'seo-video');
   const review = parseJsonResponse(raw);
   if (!review) return caption;
 
@@ -533,7 +572,7 @@ ${diversityConstraint}
 [{"title":"標題","skeleton_id":"骨架ID","angle":"角度","why":"原因","char_count":30}]
 共 5 個。`;
 
-  const raw = await callGemini(prompt);
+  const raw = await callGemini(prompt, undefined, 'seo-video');
   return parseJsonResponse(raw) as Record<string, unknown>[] | null;
 }
 
@@ -573,7 +612,7 @@ ${content.substring(0, 1000)}
 ## 輸出 JSON 陣列
 [{"index":0,"original_title":"xxx","overall":"pass/revise","revised_title":"修改版","note":"說明"}]`;
 
-  const raw = await callGemini(prompt);
+  const raw = await callGemini(prompt, undefined, 'seo-video');
   const reviews = parseJsonResponse(raw) as any[] | null;
   if (!reviews) return titles;
 
