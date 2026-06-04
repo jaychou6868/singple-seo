@@ -11,6 +11,7 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import { reportUsage } from './usage-reporter.js';
 
 export type NLPMode = 'naive' | 'local' | 'global' | 'hybrid' | 'mix';
 
@@ -771,7 +772,22 @@ export async function academicToKaren(
     );
     clearTimeout(timer);
 
-    const data = (await r.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }> };
+    const data = (await r.json()) as {
+      candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>;
+      usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number };
+    };
+    // AI 用量埋點（fire-and-forget）—— 2026-06-05 補：全系統盤點時發現此呼叫點是唯一漏網
+    //（同名檔主站版有埋、本檔漏了）。completion 含 thinking token。
+    const um = data.usageMetadata;
+    if (um) {
+      reportUsage({
+        feature: 'academic-to-karen',
+        provider: 'gemini',
+        model: 'gemini-3.5-flash',
+        promptTokens: um.promptTokenCount,
+        completionTokens: (um.candidatesTokenCount ?? 0) + (um.thoughtsTokenCount ?? 0),
+      });
+    }
     // Filter out thinking parts (Gemini 3.1 Pro Preview 會回 thinking + text parts)
     const parts = data.candidates?.[0]?.content?.parts || [];
     let text: string | undefined;
