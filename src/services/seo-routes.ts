@@ -13,10 +13,8 @@ import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { Storage } from '@google-cloud/storage';
 import { createClient } from '@supabase/supabase-js';
-import { processVideoSeo, deleteGcsObject, extractThumbnailTimestamps } from './seo-video.js';
+import { processVideoSeo, deleteGcsObject } from './seo-video.js';
 import { runViralLearner, testViralLearnerSave } from './viral-learner.js';
-import { runLockedChannelLearner } from './locked-channel-learner.js';
-import { generateThumbnails } from './thumbnail-generator.js';
 import { nanoid } from 'nanoid';
 
 // ── Config ──────────────────────────────────────────────────
@@ -84,40 +82,6 @@ export const seoRoutes = new Hono();
     }
   } catch (err) {
     console.error('[SEO] Cleanup error:', err);
-  }
-})();
-
-// ── Locked-channel learner self-waking cron (runs once on import) ─
-//
-// Zeabur has no native cron. Instead we check on every cold start
-// whether the learner ran > 30 days ago and trigger it in the background
-// if so. Because Zeabur services restart at least weekly (push, idle reset),
-// this approximates a monthly cron without external dependencies.
-
-(async () => {
-  try {
-    const { data } = await supabase
-      .from('learner_meta')
-      .select('last_run_at')
-      .eq('id', 'locked_channel_learner')
-      .maybeSingle();
-    const lastRun = data?.last_run_at ? new Date(data.last_run_at) : null;
-    // Karen 2026-04-07: bumped from 30 → 14 days. Two channels post 1-2
-    // videos a week each, so a 14-day refresh keeps the reference pool
-    // closer to current trends without burning Gemini quota.
-    const fourteenDaysAgo = Date.now() - 14 * 24 * 60 * 60 * 1000;
-    if (!lastRun || lastRun.getTime() < fourteenDaysAgo) {
-      console.log(`[SEO] Locked learner auto-trigger: lastRun=${lastRun?.toISOString() ?? 'never'} (running in background)`);
-      // Don't await — let it run async, the run takes ~5-7 minutes
-      runLockedChannelLearner().catch(err => {
-        console.error('[SEO] Locked learner auto-trigger failed:', err);
-      });
-    } else {
-      const daysAgo = Math.round((Date.now() - lastRun.getTime()) / (24 * 60 * 60 * 1000));
-      console.log(`[SEO] Locked learner last ran ${daysAgo} days ago — skipping auto-trigger`);
-    }
-  } catch (err) {
-    console.error('[SEO] Locked learner auto-trigger check failed:', err);
   }
 })();
 
@@ -204,7 +168,6 @@ seoRoutes.get('/process/:jobId', async (c) => {
             titles: result.titles,
             episodeNumber: result.episodeNumber,
             transcript: result.transcript,
-            thumbnailTimestamps: result.thumbnailTimestamps,
           },
         }),
         event: 'done',
@@ -386,289 +349,6 @@ seoRoutes.delete('/kb-test-cleanup', async (c) => {
   });
 });
 
-// ── Thumbnail: Generate candidates ────────────────────────
-
-seoRoutes.post('/thumbnail/generate', async (c) => {
-  try {
-    const { jobId, frames, title, videoSummary, videoType } = await c.req.json();
-    if (!jobId || !frames?.length || !title) {
-      return c.json({ error: 'Missing jobId, frames, or title' }, 400);
-    }
-
-    // Normalize frames: strip "data:image/jpeg;base64," prefix if present.
-    // The frontend uses canvas.toDataURL() which returns the full data URL,
-    // but Sharp's Buffer.from(x, 'base64') needs pure base64 — otherwise
-    // it decodes the prefix as garbage bytes and throws "Input buffer
-    // contains unsupported image format" inside Sharp.
-    // Karen 2026-04-07 main-site test caught this — first front-end run
-    // failed with that error while my curl tests using pre-stripped base64
-    // succeeded.
-    const normalizedFrames = (frames as string[]).map((f) => {
-      if (typeof f !== 'string') return f;
-      const commaIdx = f.indexOf(',');
-      if (f.startsWith('data:') && commaIdx > 0) {
-        return f.substring(commaIdx + 1);
-      }
-      return f;
-    });
-
-    // Only generate thumbnails for long videos (duration > 60s)
-    const { data: job } = await supabase.from('seo_jobs').select('video_type').eq('id', jobId).single();
-    if (job?.video_type !== 'long') {
-      return c.json({ ok: true, candidates: [], skipped: true, reason: 'short video — thumbnails only for long videos (>1 min)' });
-    }
-
-    // Run thumbnail generation (async, returns when done)
-    const result = await generateThumbnails({
-      jobId,
-      frames: normalizedFrames,
-      title,
-      videoSummary: videoSummary || '',
-      videoType: videoType || 'tutorial',
-    });
-
-    return c.json({ ok: true, candidates: result.candidates });
-  } catch (err) {
-    console.error('Thumbnail generation error:', err);
-    return c.json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
-  }
-});
-
-// ── Thumbnail: Debug test timestamp extraction ────────────
-
-seoRoutes.get('/thumbnail/test-timestamps/:jobId', async (c) => {
-  const jobId = c.req.param('jobId');
-  const { data: job } = await supabase.from('seo_jobs').select('file_key').eq('id', jobId).single();
-  if (!job?.file_key) return c.json({ error: 'Job not found or no file_key' }, 404);
-
-  // Re-register the GCS file with Gemini (same as in analyzeVideoWithGemini)
-  const { GoogleAuth } = await import('google-auth-library');
-  let storageOptions: any = {};
-  if (process.env.GCS_KEY_JSON) {
-    storageOptions = JSON.parse(Buffer.from(process.env.GCS_KEY_JSON, 'base64').toString());
-  }
-  const auth = new GoogleAuth({ credentials: storageOptions, scopes: ['https://www.googleapis.com/auth/generative-language', 'https://www.googleapis.com/auth/cloud-platform'] });
-  const client = await auth.getClient();
-  const tokenRes = await client.getAccessToken();
-
-  const registerRes = await fetch('https://generativelanguage.googleapis.com/v1beta/files:register', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${tokenRes.token}`,
-      'x-goog-user-project': 'gen-lang-client-0010622782',
-    },
-    body: JSON.stringify({ uris: [job.file_key] }),
-  });
-  const registerData = await registerRes.json() as any;
-  const fileUri = registerData?.files?.[0]?.uri;
-  if (!fileUri) return c.json({ error: 'GCS register failed', detail: registerData }, 500);
-
-  // Wait for propagation
-  await new Promise(r => setTimeout(r, 3000));
-
-  // Call extractThumbnailTimestamps
-  const timestamps = await extractThumbnailTimestamps(fileUri);
-  return c.json({ ok: true, fileUri, timestamps, count: timestamps.length });
-});
-
-// ── Thumbnail: Debug imgly background removal ─────────────
-//
-// Karen 2026-04-07: imgly was returning the raw frame in production
-// (fallback path), meaning the lib silently throws on Zeabur. This
-// endpoint runs imgly directly on a tiny test image and returns the
-// error string so we can see what's wrong.
-
-seoRoutes.get('/thumbnail/debug-imgly', async (c) => {
-  try {
-    const { removeBackground } = await import('@imgly/background-removal-node');
-    // 1×1 red JPEG (smallest valid JPEG, so we don't ship test asset)
-    const tinyJpeg = Buffer.from(
-      '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAAAP/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AL+B/9k=',
-      'base64',
-    );
-    // Zeabur might not have global Blob — explicitly import from node:buffer
-    const { Blob: NodeBlob } = await import('node:buffer');
-    const inputBlob = new NodeBlob([tinyJpeg], { type: 'image/jpeg' });
-    const blobType = (inputBlob as any).type;
-    const nodeVer = process.version;
-    const t0 = Date.now();
-    const blob = await removeBackground(inputBlob as any, { model: 'medium' });
-    const elapsed = Date.now() - t0;
-    const buf = Buffer.from(await blob.arrayBuffer());
-    return c.json({
-      ok: true,
-      elapsed_ms: elapsed,
-      output_bytes: buf.length,
-      cwd: process.cwd(),
-      blobType,
-      nodeVer,
-    });
-  } catch (err) {
-    const e = err as any;
-    return c.json({
-      ok: false,
-      error: e?.message || String(err),
-      stack: (e?.stack || '').split('\n').slice(0, 10).join('\n'),
-      code: e?.code,
-      cwd: process.cwd(),
-      nodeVer: process.version,
-    }, 500);
-  }
-});
-
-// ── Thumbnail: Smoke test (v32 split-around-face) ─────────
-//
-// Karen 2026-04-07: end-to-end smoke test for the v32 split layout.
-// Accepts N base64 frames + a fake title, runs generateThumbnails in
-// dryRun mode (no DB writes), returns the resulting candidates inline
-// as base64 data URLs. Use case: after deploying v32 changes, hit this
-// from curl with 1-3 test frames and confirm the new layout renders
-// without booting a full SEO job pipeline.
-//
-// Why a Zeabur endpoint and not a local script: librsvg + Noto CJK
-// fonts only exist inside the Docker container (commit 36e5012). A
-// local node script would render 豆腐.
-//
-// Body: { frames: string[base64], title?: string }
-// Returns: { ok, candidates: [{ thumbnailText, layout_type, image_url }] }
-
-seoRoutes.post('/thumbnail/smoke-test', async (c) => {
-  const adminKey = process.env.ADMIN_KEY;
-  if (adminKey && c.req.header('x-admin-key') !== adminKey) {
-    return c.json({ error: 'Unauthorized — provide X-Admin-Key header' }, 401);
-  }
-  try {
-    const body = await c.req.json();
-    const frames = (body.frames as string[]) || [];
-    if (!frames.length) {
-      return c.json({ error: 'frames[] required (base64 JPEG, no data: prefix)' }, 400);
-    }
-    const title = body.title || '影視颶風 v32 smoke test';
-    const videoSummary = body.videoSummary || '歌唱教學影片，主題：高音與氣息控制';
-    const videoType = body.videoType || 'tutorial';
-
-    // Strip data: prefix if present (same normalization as /thumbnail/generate)
-    const normalized = frames.map((f) => {
-      if (typeof f !== 'string') return f;
-      const commaIdx = f.indexOf(',');
-      if (f.startsWith('data:') && commaIdx > 0) return f.substring(commaIdx + 1);
-      return f;
-    });
-
-    const result = await generateThumbnails({
-      jobId: 'smoke-test-' + Date.now(),
-      frames: normalized,
-      title,
-      videoSummary,
-      videoType,
-    });
-
-    return c.json({
-      ok: true,
-      count: result.candidates.length,
-      candidates: result.candidates.map((c) => ({
-        thumbnailText: c.thumbnailText,
-        patternId: c.patternId,
-        referenceVideoIds: c.referenceVideoIds,
-        image_url: c.imageUrl,
-      })),
-    });
-  } catch (err) {
-    console.error('Thumbnail smoke-test error:', err);
-    return c.json({ error: err instanceof Error ? err.message : 'Unknown error' }, 500);
-  }
-});
-
-// ── Thumbnail: Manual learn from locked channels ──────────
-//
-// Triggers the locked-channel learner (MrBeast + 影視颶風) to refresh the
-// reference pool used by /thumbnail/generate. Protected by ADMIN_KEY env
-// var to prevent random callers burning Gemini quota.
-
-seoRoutes.post('/thumbnail/learn', async (c) => {
-  const adminKey = process.env.ADMIN_KEY;
-  if (adminKey) {
-    if (c.req.header('x-admin-key') !== adminKey) {
-      return c.json({ error: 'Unauthorized — provide X-Admin-Key header' }, 401);
-    }
-  } else {
-    console.warn('[Locked Learner] ADMIN_KEY env var not set — endpoint is unprotected');
-  }
-
-  // Fire-and-forget — learner takes ~5-7 min, exceeds Zeabur's 100s proxy
-  // timeout if awaited. Return 202 immediately; check Zeabur logs for result.
-  runLockedChannelLearner().catch(err => {
-    console.error('Locked-channel learner manual trigger failed:', err);
-  });
-  return c.json({ ok: true, status: 'started', message: 'Learner running in background (~5-7 min). Check Zeabur logs for completion.' }, 202);
-});
-
-// ── Thumbnail: Get candidates ─────────────────────────────
-
-seoRoutes.get('/thumbnail/candidates/:jobId', async (c) => {
-  const jobId = c.req.param('jobId');
-  const { data, error } = await supabase
-    .from('seo_thumbnail_candidates')
-    .select('*')
-    .eq('job_id', jobId)
-    .order('created_at');
-
-  if (error) return c.json({ error: error.message }, 500);
-  return c.json({ data });
-});
-
-// ── Thumbnail: Select candidate ───────────────────────────
-
-seoRoutes.post('/thumbnail/select', async (c) => {
-  const { jobId, candidateId } = await c.req.json();
-
-  // Unselect all for this job
-  await supabase.from('seo_thumbnail_candidates')
-    .update({ selected: false })
-    .eq('job_id', jobId);
-
-  // Select the chosen one
-  const { data, error } = await supabase.from('seo_thumbnail_candidates')
-    .update({ selected: true })
-    .eq('id', candidateId)
-    .select()
-    .single();
-
-  if (error) return c.json({ error: error.message }, 500);
-
-  // Bump weight of every reference used by the chosen candidate.
-  // The new generator stores all 3 reference video_ids in
-  // reference_video_ids; the legacy pattern_id is also bumped for
-  // backward compat with old candidates.
-  const idsToBump = new Set<string>();
-  const referenceVideoIds: string[] = data?.reference_video_ids ?? [];
-  if (referenceVideoIds.length > 0) {
-    const { data: refs } = await supabase
-      .from('seo_thumbnail_patterns')
-      .select('id')
-      .in('video_id', referenceVideoIds);
-    for (const r of (refs ?? []) as { id: string }[]) idsToBump.add(r.id);
-  }
-  if (data?.pattern_id) idsToBump.add(data.pattern_id);
-
-  for (const id of idsToBump) {
-    const { data: pattern } = await supabase
-      .from('seo_thumbnail_patterns')
-      .select('weight')
-      .eq('id', id)
-      .maybeSingle();
-    if (pattern) {
-      await supabase
-        .from('seo_thumbnail_patterns')
-        .update({ weight: Math.min((pattern.weight || 1) + 0.2, 3.0) })
-        .eq('id', id);
-    }
-  }
-
-  return c.json({ ok: true, bumpedReferences: idsToBump.size });
-});
-
 // ── Viral Learner: Test save pipeline (bypass YouTube) ────
 
 seoRoutes.post('/viral-learn-test', async (c) => {
@@ -686,10 +366,6 @@ seoRoutes.post('/viral-learn-test', async (c) => {
 seoRoutes.post('/viral-learn', async (c) => {
   try {
     const result = await runViralLearner();
-
-    // Note: thumbnail learning is no longer chained to viral-learner — it now
-    // runs only on manual POST /thumbnail/learn (locked channels only).
-
     return c.json({ ok: true, result });
   } catch (err) {
     console.error('Viral Learner error:', err);
