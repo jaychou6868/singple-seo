@@ -16,8 +16,9 @@ import { reportUsage } from './usage-reporter.js';
 // ── Config ──────────────────────────────────────────────────
 
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-const GEMINI_MODEL = 'gemini-3.5-flash';
+// 2026-07-10 Gemini key 全作廢 → 標題模式分析改 gpt-5.6-terra（與 seo-video.ts 同步遷移）
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+const OPENAI_MODEL = 'gpt-5.6-terra';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
@@ -230,22 +231,21 @@ ${titlesText}
 
 輸出 JSON 陣列。`;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-
+  // GPT-5 系列：不支援自訂 temperature、要用 max_completion_tokens
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 300000);
 
   try {
-    const res = await fetch(url, {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: 16384,
-          thinkingConfig: { thinkingLevel: 'high' },
-        },
+        model: OPENAI_MODEL,
+        messages: [{ role: 'user', content: prompt }],
+        max_completion_tokens: 16384,
       }),
       signal: controller.signal,
     });
@@ -253,25 +253,21 @@ ${titlesText}
     const data = await res.json() as any;
 
     // Report AI usage (fire-and-forget).
-    const um = data?.usageMetadata;
-    if (um) {
+    const usage = data?.usage;
+    if (usage) {
       reportUsage({
         feature: 'viral-learner',
-        provider: 'gemini',
-        model: GEMINI_MODEL,
-        promptTokens: um.promptTokenCount,
-        completionTokens: (um.candidatesTokenCount ?? 0) + (um.thoughtsTokenCount ?? 0),
+        provider: 'openai',
+        model: data?.model || OPENAI_MODEL,
+        promptTokens: usage.prompt_tokens,
+        completionTokens: usage.completion_tokens,
       });
     }
 
-    const parts = data?.candidates?.[0]?.content?.parts || [];
-    let text = '';
-    for (let i = parts.length - 1; i >= 0; i--) {
-      if (parts[i].text) { text = parts[i].text; break; }
-    }
+    const text = data?.choices?.[0]?.message?.content || '';
 
-    if (!text) {
-      console.error('[Viral Learner] Gemini returned no text');
+    if (!res.ok || !text) {
+      console.error(`[Viral Learner] ${OPENAI_MODEL} returned no text: ${JSON.stringify(data).substring(0, 200)}`);
       return [];
     }
 

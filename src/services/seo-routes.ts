@@ -153,6 +153,68 @@ seoRoutes.get('/process/:jobId', async (c) => {
       }
     };
 
+    const sendDone = async (job: Record<string, any>) => {
+      await stream.writeSSE({
+        data: JSON.stringify({
+          progress: 100,
+          stage: 'done',
+          detail: '完成！',
+          result: {
+            caption: job.caption,
+            titles: job.titles,
+            episodeNumber: job.episode_number,
+            transcript: job.transcript,
+          },
+        }),
+        event: 'done',
+      });
+    };
+
+    // 冪等守衛：前端 EventSource 斷線後每 3 秒自動重連，此端點不能重跑 pipeline。
+    // done → 重播結果；failed → 重播錯誤（重試走 POST /retry 設回 pending）；
+    // 新鮮 processing → 跟隨進度直到終態；只有 pending / 殭屍 processing 才真正開跑。
+    const STALE_MS = 30 * 60 * 1000;
+    const { data: existing } = await supabase
+      .from('seo_jobs')
+      .select('status, progress, stage, stage_detail, caption, titles, episode_number, transcript, updated_at')
+      .eq('id', jobId)
+      .single();
+
+    if (!existing) {
+      await stream.writeSSE({ data: JSON.stringify({ progress: 0, stage: 'error', detail: `Job ${jobId} not found` }), event: 'error' });
+      return;
+    }
+    if (existing.status === 'done') {
+      await sendDone(existing);
+      return;
+    }
+    if (existing.status === 'failed') {
+      await stream.writeSSE({ data: JSON.stringify({ progress: existing.progress ?? 0, stage: 'error', detail: existing.stage_detail || '處理失敗，請按重試' }), event: 'error' });
+      return;
+    }
+    if (existing.status === 'processing' && Date.now() - new Date(existing.updated_at).getTime() < STALE_MS) {
+      // 另一條連線正在跑 → 這裡只跟隨進度，不重複開跑
+      while (true) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const { data: j } = await supabase
+          .from('seo_jobs')
+          .select('status, progress, stage, stage_detail, caption, titles, episode_number, transcript, updated_at')
+          .eq('id', jobId)
+          .single();
+        if (!j) return;
+        if (j.status === 'done') { await sendDone(j); return; }
+        if (j.status === 'failed') {
+          await stream.writeSSE({ data: JSON.stringify({ progress: j.progress ?? 0, stage: 'error', detail: j.stage_detail || '處理失敗' }), event: 'error' });
+          return;
+        }
+        if (Date.now() - new Date(j.updated_at).getTime() >= STALE_MS) {
+          await stream.writeSSE({ data: JSON.stringify({ progress: j.progress ?? 0, stage: 'error', detail: `處理中斷（卡在 ${j.stage}），請重試` }), event: 'error' });
+          return;
+        }
+        await stream.writeSSE({ data: JSON.stringify({ progress: j.progress ?? 0, stage: j.stage, detail: j.stage_detail || '' }), event: 'progress' });
+      }
+    }
+
     try {
       const resultPromise = processVideoSeo(jobId, sendProgress);
       const result = await resultPromise;

@@ -708,7 +708,8 @@ export function formatArchitectAsPrompt(architect: ArchitectResult, maxLength = 
 }
 
 // ═══════════════════════════════════════════════════════════
-// Answer translator — academic → Karen plain hint (Gemini 2.5 Flash)
+// Answer translator — academic → Karen plain hint (gpt-5.6-terra)
+// 2026-07-10 Gemini key 全作廢 → 遷移 OpenAI（對齊 singple-autoreply 同名函式先例）
 // ═══════════════════════════════════════════════════════════
 
 const TRANSLATE_SYSTEM_PROMPT = `你是把學術 NLP 理論轉成寫作助手 prompt 的翻譯官。
@@ -735,9 +736,9 @@ export async function academicToKaren(
 ): Promise<string> {
   if (!academicAnswer || academicAnswer.trim().length < 50) return academicAnswer;
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    console.warn('[nlp_kb] GEMINI_API_KEY not set, returning truncated raw');
+    console.warn('[nlp_kb] OPENAI_API_KEY not set, returning truncated raw');
     return academicAnswer.substring(0, 500);
   }
 
@@ -745,58 +746,46 @@ export async function academicToKaren(
 
   try {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 30000);
+    const timer = setTimeout(() => ctrl.abort(), 60000);
 
-    // Model routing: Zeabur 端沒有 Opus 可用，直接用 Gemini 3.1 Pro Preview
-    // （對齊 Karen 的 feedback_model_routing.md fallback 層）
-    const r = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey,
-        },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: TRANSLATE_SYSTEM_PROMPT }] },
-          contents: [{ parts: [{ text: userPrompt }] }],
-          generationConfig: {
-            temperature: 0.3,
-            maxOutputTokens: 2048,
-            // Gemini 3.1 Pro Preview 支援 thinking，用 medium 比 Flash 的 0 好
-            thinkingConfig: { thinkingLevel: 'high' },
-          },
-        }),
-        signal: ctrl.signal,
+    // GPT-5 系列：不支援自訂 temperature；reasoning token 吃 completion 額度，
+    // 上限給 4096 避免推理吃光後正文變空
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
       },
-    );
+      body: JSON.stringify({
+        model: 'gpt-5.6-terra',
+        messages: [
+          { role: 'system', content: TRANSLATE_SYSTEM_PROMPT },
+          { role: 'user', content: userPrompt },
+        ],
+        max_completion_tokens: 4096,
+      }),
+      signal: ctrl.signal,
+    });
     clearTimeout(timer);
 
     const data = (await r.json()) as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }>;
-      usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number };
+      choices?: Array<{ message?: { content?: string } }>;
+      model?: string;
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
     };
     // AI 用量埋點（fire-and-forget）—— 2026-06-05 補：全系統盤點時發現此呼叫點是唯一漏網
-    //（同名檔主站版有埋、本檔漏了）。completion 含 thinking token。
-    const um = data.usageMetadata;
-    if (um) {
+    //（同名檔主站版有埋、本檔漏了）。
+    const usage = data.usage;
+    if (usage) {
       reportUsage({
         feature: 'academic-to-karen',
-        provider: 'gemini',
-        model: 'gemini-3.5-flash',
-        promptTokens: um.promptTokenCount,
-        completionTokens: (um.candidatesTokenCount ?? 0) + (um.thoughtsTokenCount ?? 0),
+        provider: 'openai',
+        model: data.model || 'gpt-5.6-terra',
+        promptTokens: usage.prompt_tokens,
+        completionTokens: usage.completion_tokens,
       });
     }
-    // Filter out thinking parts (Gemini 3.1 Pro Preview 會回 thinking + text parts)
-    const parts = data.candidates?.[0]?.content?.parts || [];
-    let text: string | undefined;
-    for (const part of parts) {
-      if (part.text && !part.thought) {
-        text = part.text.trim();
-        break;
-      }
-    }
+    const text = data.choices?.[0]?.message?.content?.trim();
     return text || academicAnswer.substring(0, 500);
   } catch (e) {
     console.warn('[nlp_kb] translator failed:', (e as Error).message);

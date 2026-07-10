@@ -1,16 +1,27 @@
 /**
  * SEO Video Service — 影片 SEO 文案 + YouTube 標題生成
  *
- * 流程：前端直傳 GCS → Gemini 直讀 gs:// URI（零下載）
+ * 流程：前端直傳 GCS → 服務端下載 → ffmpeg 抽音軌/截圖 →
+ *       gpt-4o-mini-transcribe 轉錄（5 分鐘分段）→ gpt-5.6-terra 分析＋生成
  *
- * 生成: Gemini 3.1 Pro (thinkingLevel: high)
- * 審核: Gemini 3.1 Pro NLP 審核
+ * 2026-07-10 從 Gemini 全面遷移到 OpenAI：Google 帳務事故後所有 Gemini key
+ * 作廢（400 API_KEY_INVALID），Karen 拍板改用 gpt-5.6-terra（5.6 家族中階層）。
+ * GPT-5.6 全家族（sol/terra/luna）都不支援原生影片/音訊輸入（官方 modality 表
+ * video ✗ audio ✗，實測丟 mp4 回 400 invalid_image_format），故影片理解改為
+ * 「轉錄文字＋畫面截圖」組合。
+ *
+ * 生成: gpt-5.6-terra（$2.5/$15 per 1M，cached input $0.25）
+ * 審核: gpt-5.6-terra NLP 審核
  * 編號: YouTube Data API v3
  */
 
 import { Storage } from '@google-cloud/storage';
-import { GoogleAuth } from 'google-auth-library';
 import { createClient } from '@supabase/supabase-js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { selectDiverseSkeletons, buildDiversityConstraint, getRecentDNA, recordDNA } from './dna-tracker.js';
 import type { CaptionDNA } from './dna-tracker.js';
 import { preHint, postReview } from './nlp_kb_client.js';
@@ -20,14 +31,19 @@ import { reportUsage } from './usage-reporter.js';
 
 const GCS_BUCKET_NAME = 'singple-seo-videos';
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
 const YOUTUBE_CHANNEL_ID = 'UCo3Z0bh4OnwPL5z4rMwNqbg';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
-const GEMINI_MODEL = 'gemini-3.5-flash';
+const OPENAI_MODEL = 'gpt-5.6-terra';
+const TRANSCRIBE_MODEL = 'gpt-4o-mini-transcribe';
+// gpt-4o transcribe 系列輸出 2048 token 上限會靜默截斷 → 音軌一律切 ≤5 分鐘段
+const AUDIO_CHUNK_SECONDS = 300;
+
+const execFileAsync = promisify(execFile);
 
 // ── Clients ─────────────────────────────────────────────────
 
@@ -40,15 +56,6 @@ if (process.env.GCS_KEY_JSON) {
 }
 const gcsStorage = new Storage(gcsStorageOptions);
 const gcsBucket = gcsStorage.bucket(GCS_BUCKET_NAME);
-
-// Reuse the same credentials for Gemini OAuth (files:register requires OAuth, not API key)
-let geminiAuth: GoogleAuth;
-if (process.env.GCS_KEY_JSON) {
-  const credentials = JSON.parse(Buffer.from(process.env.GCS_KEY_JSON, 'base64').toString());
-  geminiAuth = new GoogleAuth({ credentials, scopes: ['https://www.googleapis.com/auth/generative-language', 'https://www.googleapis.com/auth/cloud-platform'] });
-} else {
-  geminiAuth = new GoogleAuth({ keyFilename: './gcs-key.json', scopes: ['https://www.googleapis.com/auth/generative-language', 'https://www.googleapis.com/auth/cloud-platform'] });
-}
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
@@ -90,55 +97,142 @@ export async function deleteGcsObject(gcsUri: string): Promise<void> {
   console.log(`[SEO] GCS deleted: ${path}`);
 }
 
-// ── Gemini API ──────────────────────────────────────────────
+// ── OpenAI API（gpt-5.6-terra）───────────────────────────────
+// GPT-5 系列雷點：不支援自訂 temperature/top_p（硬塞回 400）、
+// 要用 max_completion_tokens 不是 max_tokens。
 
-async function callGemini(prompt: string, systemPrompt?: string, feature = 'seo-video'): Promise<string> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+async function callLuna(
+  prompt: string,
+  systemPrompt?: string,
+  feature = 'seo-video',
+  imageDataUrls: string[] = [],
+): Promise<string> {
+  if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY 未設定');
 
-  const payload: Record<string, unknown> = {
-    contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: {
-      temperature: 0.8,
-      maxOutputTokens: 16384,
-      thinkingConfig: { thinkingLevel: 'high' },
-    },
-  };
+  const userContent: unknown = imageDataUrls.length
+    ? [
+        ...imageDataUrls.map((url) => ({ type: 'image_url', image_url: { url } })),
+        { type: 'text', text: prompt },
+      ]
+    : prompt;
 
-  if (systemPrompt) {
-    payload.systemInstruction = { parts: [{ text: systemPrompt }] };
-  }
+  const messages: Record<string, unknown>[] = [];
+  if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+  messages.push({ role: 'user', content: userContent });
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 300000);
 
   try {
-    const res = await fetch(url, {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        messages,
+        max_completion_tokens: 16384,
+      }),
       signal: controller.signal,
     });
 
     const data = await res.json() as Record<string, any>;
 
-    // Report AI usage (fire-and-forget). usageMetadata is on the response root.
-    const um = data?.usageMetadata;
-    if (um) {
+    // Report AI usage (fire-and-forget).
+    const usage = data?.usage;
+    if (usage) {
       reportUsage({
         feature,
-        provider: 'gemini',
-        model: GEMINI_MODEL,
-        promptTokens: um.promptTokenCount,
-        // Gemini completion = candidates + thinking tokens (when present).
-        completionTokens: (um.candidatesTokenCount ?? 0) + (um.thoughtsTokenCount ?? 0),
+        provider: 'openai',
+        model: data?.model || OPENAI_MODEL,
+        promptTokens: usage.prompt_tokens,
+        completionTokens: usage.completion_tokens,
       });
     }
 
-    const parts = data?.candidates?.[0]?.content?.parts || [];
-    for (let i = parts.length - 1; i >= 0; i--) {
-      if (parts[i].text) return parts[i].text;
+    const text = data?.choices?.[0]?.message?.content;
+    if (!res.ok || !text) {
+      throw new Error(`${OPENAI_MODEL} returned no text: ${JSON.stringify(data).substring(0, 200)}`);
     }
-    throw new Error(`Gemini returned no text: ${JSON.stringify(data).substring(0, 200)}`);
+    return text;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// ── ffmpeg helpers ──────────────────────────────────────────
+
+async function ffprobeDuration(file: string): Promise<number> {
+  const { stdout } = await execFileAsync('ffprobe', [
+    '-v', 'error',
+    '-show_entries', 'format=duration',
+    '-of', 'default=noprint_wrappers=1:nokey=1',
+    file,
+  ]);
+  const d = parseFloat(stdout.trim());
+  return Number.isFinite(d) ? d : 0;
+}
+
+/** 抽音軌 → 單聲道 16kHz 64kbps mp3，按 AUDIO_CHUNK_SECONDS 分段 */
+async function extractAudioChunks(videoPath: string, dir: string): Promise<string[]> {
+  await execFileAsync('ffmpeg', [
+    '-y', '-i', videoPath,
+    '-vn', '-ac', '1', '-ar', '16000', '-b:a', '64k',
+    '-f', 'segment', '-segment_time', String(AUDIO_CHUNK_SECONDS), '-reset_timestamps', '1',
+    path.join(dir, 'audio-%03d.mp3'),
+  ], { timeout: 600000 });
+  const files = (await readdir(dir)).filter((f) => f.startsWith('audio-') && f.endsWith('.mp3')).sort();
+  return files.map((f) => path.join(dir, f));
+}
+
+/** 抽 2 張畫面截圖（720px 寬 jpeg）給 terra 看畫面；失敗不阻擋（轉錄文字才是主體） */
+async function extractFrames(videoPath: string, dir: string, duration: number): Promise<string[]> {
+  const times = duration > 4 ? [duration * 0.25, duration * 0.6] : [0];
+  const out: string[] = [];
+  for (let i = 0; i < times.length; i++) {
+    const p = path.join(dir, `frame-${i}.jpg`);
+    try {
+      await execFileAsync('ffmpeg', [
+        '-y', '-ss', times[i].toFixed(2), '-i', videoPath,
+        '-frames:v', '1', '-vf', "scale='min(720,iw)':-2", '-q:v', '4',
+        p,
+      ], { timeout: 60000 });
+      out.push(p);
+    } catch (err) {
+      console.warn(`[SEO] frame extract failed @${times[i].toFixed(1)}s:`, (err as Error).message);
+    }
+  }
+  return out;
+}
+
+/** 單段音訊 → gpt-4o-mini-transcribe 逐字稿 */
+async function transcribeChunk(file: string): Promise<{ text: string; inputTokens: number | null; outputTokens: number | null }> {
+  const buf = await readFile(file);
+  const fd = new FormData();
+  fd.append('file', new Blob([new Uint8Array(buf)], { type: 'audio/mpeg' }), path.basename(file));
+  fd.append('model', TRANSCRIBE_MODEL);
+  fd.append('response_format', 'json');
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 300000);
+  try {
+    const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: fd,
+      signal: controller.signal,
+    });
+    const data = await res.json() as Record<string, any>;
+    if (!res.ok || typeof data?.text !== 'string') {
+      throw new Error(`transcribe HTTP ${res.status}: ${JSON.stringify(data).substring(0, 200)}`);
+    }
+    return {
+      text: data.text,
+      inputTokens: data?.usage?.input_tokens ?? null,
+      outputTokens: data?.usage?.output_tokens ?? null,
+    };
   } finally {
     clearTimeout(timeout);
   }
@@ -157,63 +251,57 @@ function parseJsonResponse(text: string): any {
   return null;
 }
 
-// ── Gemini Video Analysis (GCS → register → analyze) ──────
+// ── Video Analysis（下載 → 轉錄 → 截圖 → terra 分析）─────────
+// exported for smoke testing（_smoke_analyze.mjs 之類的一次性驗證腳本）
 
-async function analyzeVideoWithGemini(
+export async function analyzeVideo(
   gcsUri: string,
   description: string,
   jobId: string,
   onProgress?: ProgressCallback,
-): Promise<{ analysis: string; transcript: string; fileUri: string }> {
-  await updateJobProgress(jobId, 10, 'preparing', '準備影片中（GCS 直讀）...', onProgress);
+): Promise<{ analysis: string; transcript: string }> {
+  await updateJobProgress(jobId, 10, 'preparing', '從雲端下載影片中...', onProgress);
 
-  // Register GCS file with Gemini (OAuth + /v1beta/files:register)
-  await updateJobProgress(jobId, 12, 'uploading_gemini', '向 Gemini 註冊 GCS 影片...', onProgress);
+  const workDir = await mkdtemp(path.join(tmpdir(), 'seo-'));
+  try {
+    const objectPath = gcsUri.replace(`gs://${GCS_BUCKET_NAME}/`, '');
+    const videoPath = path.join(workDir, 'video.mp4');
+    await gcsBucket.file(objectPath).download({ destination: videoPath });
 
-  const authClient = await geminiAuth.getClient();
-  const tokenRes = await authClient.getAccessToken();
-  const accessToken = tokenRes.token;
+    const duration = await ffprobeDuration(videoPath);
+    console.log(`[SEO] video downloaded: ${objectPath} (${Math.round(duration)}s)`);
 
-  const registerRes = await fetch(
-    'https://generativelanguage.googleapis.com/v1beta/files:register',
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${accessToken}`,
-        'x-goog-user-project': 'gen-lang-client-0010622782',
-      },
-      body: JSON.stringify({ uris: [gcsUri] }),
-    },
-  );
+    // 轉錄（GPT-5.6 家族不吃音訊 → 音軌轉成文字才是內容主體）
+    await updateJobProgress(jobId, 12, 'transcribing', `抽取音軌並轉錄中（片長 ${Math.round(duration)} 秒）...`, onProgress);
+    const chunks = await extractAudioChunks(videoPath, workDir);
+    if (!chunks.length) throw new Error('ffmpeg 抽不出音軌（影片可能沒有聲音）');
 
-  const registerData = await registerRes.json() as any;
-  console.log(`[SEO] Gemini register GCS:`, JSON.stringify(registerData).substring(0, 300));
-  const registeredFile = registerData?.files?.[0];
-  let fileUri = registeredFile?.uri;
+    const parts: string[] = [];
+    for (const chunk of chunks) {
+      const r = await transcribeChunk(chunk);
+      parts.push(r.text);
+      reportUsage({
+        feature: 'seo-video-transcribe',
+        provider: 'openai',
+        model: TRANSCRIBE_MODEL,
+        promptTokens: r.inputTokens,
+        completionTokens: r.outputTokens,
+        estimated: r.inputTokens == null,
+        meta: { chunkSeconds: Math.min(AUDIO_CHUNK_SECONDS, Math.round(duration)) },
+      });
+    }
+    const transcript = parts.join('\n').trim();
+    if (!transcript) throw new Error('轉錄結果為空（影片沒有可辨識的人聲）');
 
-  if (!fileUri) {
-    throw new Error(`Gemini GCS register failed: ${JSON.stringify(registerData).substring(0, 300)}`);
-  }
+    // 截圖給 terra 看畫面（輔助判斷影片類型；失敗不阻擋）
+    await updateJobProgress(jobId, 20, 'analyzing', '分析影片內容中...', onProgress);
+    const frames = await extractFrames(videoPath, workDir, duration);
+    const frameUrls: string[] = [];
+    for (const f of frames) {
+      frameUrls.push(`data:image/jpeg;base64,${(await readFile(f)).toString('base64')}`);
+    }
 
-  // Small delay for propagation (registered GCS files are immediately available)
-  await new Promise(r => setTimeout(r, 3000));
-  console.log(`[SEO] Gemini file registered: ${fileUri}`);
-
-  // Analyze video
-  const analysisUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
-  const videoFilePart = { fileData: { mimeType: 'video/mp4', fileUri } };
-
-  await updateJobProgress(jobId, 20, 'analyzing', '分析影片中...', onProgress);
-
-  const analysisData = await fetch(analysisUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{
-        parts: [
-          videoFilePart,
-          { text: `仔細觀看這支影片，分析以下資訊，用繁體中文輸出 JSON：
+    const analysisPrompt = `以下是一支影片的完整逐字稿${frameUrls.length ? '，以及 ' + frameUrls.length + ' 張畫面截圖' : ''}。請根據這些內容分析以下資訊，用繁體中文輸出 JSON：
 {
   "video_type": "教學/翻唱/日常/其他",
   "song_name": "歌曲名稱（如果有，沒有就留空字串）",
@@ -226,37 +314,17 @@ async function analyzeVideoWithGemini(
   "best_cta_type": "最適合的 CTA 類型"
 }
 
-影片描述：${description}` },
-        ],
-      }],
-      generationConfig: {
-        temperature: 0.7,
-        maxOutputTokens: 8192,
-        thinkingConfig: { thinkingLevel: 'high' },
-      },
-    }),
-  }).then(r => r.json() as Promise<any>);
+## 影片逐字稿
+${transcript.substring(0, 12000)}
 
-  // Report AI usage (fire-and-forget) for the standalone video-analysis call.
-  const analysisUm = analysisData?.usageMetadata;
-  if (analysisUm) {
-    reportUsage({
-      feature: 'seo-video',
-      provider: 'gemini',
-      model: GEMINI_MODEL,
-      promptTokens: analysisUm.promptTokenCount,
-      completionTokens: (analysisUm.candidatesTokenCount ?? 0) + (analysisUm.thoughtsTokenCount ?? 0),
-    });
+## 影片描述
+${description || '（無）'}`;
+
+    const analysis = await callLuna(analysisPrompt, undefined, 'seo-video', frameUrls);
+    return { analysis, transcript };
+  } finally {
+    rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
-
-  const transcript = '';
-  const analysisParts = analysisData?.candidates?.[0]?.content?.parts || [];
-  let analysisText = '';
-  for (let i = analysisParts.length - 1; i >= 0; i--) {
-    if (analysisParts[i].text) { analysisText = analysisParts[i].text; break; }
-  }
-
-  return { analysis: analysisText, transcript, fileUri };
 }
 
 // ── SEO Caption Generation ──────────────────────────────────
@@ -330,7 +398,7 @@ ${videoAnalysis ? `## 影片分析\n${videoAnalysis.substring(0, 1000)}` : ''}
 
 ${description ? `## 描述\n${description}` : ''}`;
 
-  const raw = await callGemini(userPrompt, systemPrompt, 'seo-video');
+  const raw = await callLuna(userPrompt, systemPrompt, 'seo-video');
   return parseJsonResponse(raw);
 }
 
@@ -380,7 +448,7 @@ ${content.substring(0, 500)}
   "suggestions": "改進建議"
 }`;
 
-  const raw = await callGemini(prompt, undefined, 'seo-video');
+  const raw = await callLuna(prompt, undefined, 'seo-video');
   const review = parseJsonResponse(raw);
   if (!review) return caption;
 
@@ -484,7 +552,7 @@ ${diversityConstraint}
 [{"title":"標題","skeleton_id":"骨架ID","angle":"角度","why":"原因","char_count":30}]
 共 5 個。`;
 
-  const raw = await callGemini(prompt, undefined, 'seo-video');
+  const raw = await callLuna(prompt, undefined, 'seo-video');
   return parseJsonResponse(raw) as Record<string, unknown>[] | null;
 }
 
@@ -524,7 +592,7 @@ ${content.substring(0, 1000)}
 ## 輸出 JSON 陣列
 [{"index":0,"original_title":"xxx","overall":"pass/revise","revised_title":"修改版","note":"說明"}]`;
 
-  const raw = await callGemini(prompt, undefined, 'seo-video');
+  const raw = await callLuna(prompt, undefined, 'seo-video');
   const reviews = parseJsonResponse(raw) as any[] | null;
   if (!reviews) return titles;
 
@@ -638,7 +706,7 @@ export async function processVideoSeo(
     throw new Error(`Unsupported file_key format (R2 no longer supported): ${fileKey}`);
   }
 
-  const result = await analyzeVideoWithGemini(fileKey, description, jobId, onProgress);
+  const result = await analyzeVideo(fileKey, description, jobId, onProgress);
   const content = result.transcript;
   const videoAnalysis: string | null = result.analysis;
 
@@ -650,7 +718,7 @@ export async function processVideoSeo(
   ]);
   let caption = captionRaw;
   if (!caption) throw new Error('SEO caption generation failed');
-  caption.source_model = 'gemini-3.5-flash';
+  caption.source_model = OPENAI_MODEL;
   let titles = titlesRaw || [];
 
   // NLP review caption + titles IN PARALLEL
@@ -704,7 +772,7 @@ export async function processVideoSeo(
     caption: caption,
     titles: titles,
     episode_number: episodeNumber,
-    model_used: 'gemini-3.5-flash',
+    model_used: OPENAI_MODEL,
     video_type: job.video_type || 'auto',
     updated_at: new Date().toISOString(),
   }).eq('id', jobId);
