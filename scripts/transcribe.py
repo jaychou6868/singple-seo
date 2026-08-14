@@ -40,7 +40,8 @@ MODEL_NAME = os.environ.get("WHISPER_MODEL", "")  # 有值就蓋掉 MODEL_DIR
 COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE", "int8")
 LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "zh")
 BEAM_SIZE = int(os.environ.get("WHISPER_BEAM_SIZE", "5"))
-CPU_THREADS = int(os.environ.get("WHISPER_THREADS", "4"))
+# 別讓執行緒數超過容器實際拿得到的核心數——超額只會互搶，反而更慢。
+CPU_THREADS = int(os.environ.get("WHISPER_THREADS", "0")) or min(4, os.cpu_count() or 1)
 
 # 繁體＋歌唱教學詞彙的提示。作用是把輸出往繁體和本領域用詞推
 # （混聲、頭聲、聲帶閉合這類詞，模型預設容易轉成同音別字）。
@@ -69,6 +70,19 @@ def main():
         return 2
 
     from faster_whisper import WhisperModel
+
+    # 印出實際跑的規格。轉錄慢的時候第一個要問的就是「容器到底拿到幾核」，
+    # 沒有這行就只能猜（Zeabur 的資源上限查不到、進不去容器）。
+    emit(
+        {
+            "type": "env",
+            "cpu_count": os.cpu_count(),
+            "threads": CPU_THREADS,
+            "model": MODEL_NAME or MODEL_DIR,
+            "compute": COMPUTE_TYPE,
+            "beam": BEAM_SIZE,
+        }
+    )
 
     model_ref = MODEL_NAME or MODEL_DIR
     model = WhisperModel(

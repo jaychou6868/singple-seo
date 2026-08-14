@@ -280,6 +280,9 @@ export async function transcribeAudio(
       }
       if (msg.type === 'progress' && typeof msg.seconds === 'number') {
         onSeconds?.(msg.seconds);
+      } else if (msg.type === 'env') {
+        // 轉錄慢的時候先看這行——容器實際拿到幾核是最常見的原因
+        console.log(`[SEO] 轉錄環境：${msg.cpu_count} 核 / ${msg.threads} 執行緒 / ${msg.compute} / beam ${msg.beam}`);
       } else if (msg.type === 'result') {
         text = typeof msg.text === 'string' ? msg.text : '';
         console.log(`[SEO] 轉錄完成：${text.length} 字（音檔 ${msg.duration}s / 影片 ${Math.round(durationSec)}s）`);
@@ -349,8 +352,18 @@ export async function analyzeVideo(
 
     // 進度條 12% → 40% 對應轉錄進度，讓長影片看得出來還在動
     // （同時每次更新都會刷新 updated_at，避開殭屍任務判定）。
+    //
+    // ⚠️ 一定要「同時只跑一筆、且限流」，不能每段都直接發。whisper 一分鐘影片
+    //    就吐 30 段，全部併發寫 Supabase 會亂序完成，進度條在畫面上會
+    //    30% → 40% → 32% → 34% 來回跳，看起來像壞掉。
+    let writing = false;
+    let lastWriteAt = 0;
     const transcript = (
       await transcribeAudio(audioPath, duration, (seconds) => {
+        const now = Date.now();
+        if (writing || now - lastWriteAt < 5000) return;
+        writing = true;
+        lastWriteAt = now;
         const ratio = duration > 0 ? Math.min(seconds / duration, 1) : 0;
         void updateJobProgress(
           jobId,
@@ -358,7 +371,7 @@ export async function analyzeVideo(
           'transcribing',
           `轉錄中 ${Math.round(seconds)} / ${Math.round(duration)} 秒...`,
           onProgress,
-        ).catch(() => {});
+        ).catch(() => {}).finally(() => { writing = false; });
       })
     ).trim();
     if (!transcript) throw new Error('轉錄結果為空（影片沒有可辨識的人聲）');
