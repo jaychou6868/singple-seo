@@ -26,12 +26,15 @@ import { selectDiverseSkeletons, buildDiversityConstraint, getRecentDNA, recordD
 import type { CaptionDNA } from './dna-tracker.js';
 import { preHint, postReview } from './nlp_kb_client.js';
 import { reportUsage } from './usage-reporter.js';
+import { AI_CHAT_URL, AI_CHAT_KEY, AI_PROVIDER } from './aiGateway.js';
 
 // ── Config ──────────────────────────────────────────────────
 
 const GCS_BUCKET_NAME = 'singple-seo-videos';
 
+// 轉錄仍打真正的 OpenAI（訂閱額度沒有轉錄介面），所以保留這把真金鑰。
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
 const YOUTUBE_CHANNEL_ID = 'UCo3Z0bh4OnwPL5z4rMwNqbg';
 
@@ -124,11 +127,11 @@ async function callLuna(
   const timeout = setTimeout(() => controller.abort(), 300000);
 
   try {
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    const res = await fetch(AI_CHAT_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        Authorization: `Bearer ${AI_CHAT_KEY}`,
       },
       body: JSON.stringify({
         model: OPENAI_MODEL,
@@ -145,7 +148,7 @@ async function callLuna(
     if (usage) {
       reportUsage({
         feature,
-        provider: 'openai',
+        provider: AI_PROVIDER,
         model: data?.model || OPENAI_MODEL,
         promptTokens: usage.prompt_tokens,
         completionTokens: usage.completion_tokens,
@@ -282,6 +285,8 @@ export async function analyzeVideo(
       parts.push(r.text);
       reportUsage({
         feature: 'seo-video-transcribe',
+        // 轉錄仍走真正的 OpenAI API（訂閱額度沒有轉錄介面），所以還是按量計費。
+        // 改用容器內 faster-whisper 之後，這裡要一起改成免費/不計費。
         provider: 'openai',
         model: TRANSCRIBE_MODEL,
         promptTokens: r.inputTokens,

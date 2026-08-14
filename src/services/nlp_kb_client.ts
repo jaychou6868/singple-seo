@@ -12,6 +12,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { reportUsage } from './usage-reporter.js';
+import { AI_CHAT_URL, AI_CHAT_KEY, AI_PROVIDER } from './aiGateway.js';
 
 export type NLPMode = 'naive' | 'local' | 'global' | 'hybrid' | 'mix';
 
@@ -736,7 +737,7 @@ export async function academicToKaren(
 ): Promise<string> {
   if (!academicAnswer || academicAnswer.trim().length < 50) return academicAnswer;
 
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = AI_CHAT_KEY;
   if (!apiKey) {
     console.warn('[nlp_kb] OPENAI_API_KEY not set, returning truncated raw');
     return academicAnswer.substring(0, 500);
@@ -750,7 +751,7 @@ export async function academicToKaren(
 
     // GPT-5 系列：不支援自訂 temperature；reasoning token 吃 completion 額度，
     // 上限給 4096 避免推理吃光後正文變空
-    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+    const r = await fetch(AI_CHAT_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -779,7 +780,7 @@ export async function academicToKaren(
     if (usage) {
       reportUsage({
         feature: 'academic-to-karen',
-        provider: 'openai',
+        provider: AI_PROVIDER,
         model: data.model || 'gpt-5.6-terra',
         promptTokens: usage.prompt_tokens,
         completionTokens: usage.completion_tokens,

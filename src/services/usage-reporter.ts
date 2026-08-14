@@ -23,7 +23,10 @@ let warnedMissingEnv = false;
 
 export interface UsageReport {
   feature: string;
-  provider: 'openai' | 'gemini';
+  // chatgpt-subscription：2026-08-14 起文字生成改走 singple-chatgpt-bridge
+  // （Karen 的 ChatGPT Team 訂閱額度，成本 0）。主站 ingest 白名單已同步新增。
+  // 音軌轉錄仍是 'openai'——訂閱額度沒有轉錄介面，那條還在按量計費。
+  provider: 'openai' | 'gemini' | 'chatgpt-subscription';
   model: string;
   promptTokens?: number | null;
   completionTokens?: number | null;

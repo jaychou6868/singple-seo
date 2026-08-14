@@ -12,12 +12,13 @@ import { createClient } from '@supabase/supabase-js';
 import { nanoid } from 'nanoid';
 import { extractPatterns } from './nlp_kb_client.js';
 import { reportUsage } from './usage-reporter.js';
+import { AI_CHAT_URL, AI_CHAT_KEY, AI_PROVIDER } from './aiGateway.js';
 
 // ── Config ──────────────────────────────────────────────────
 
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
 // 2026-07-10 Gemini key 全作廢 → 標題模式分析改 gpt-5.6-terra（與 seo-video.ts 同步遷移）
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+const OPENAI_API_KEY = AI_CHAT_KEY;
 const OPENAI_MODEL = 'gpt-5.6-terra';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
@@ -236,7 +237,7 @@ ${titlesText}
   const timeout = setTimeout(() => controller.abort(), 300000);
 
   try {
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    const res = await fetch(AI_CHAT_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -257,7 +258,7 @@ ${titlesText}
     if (usage) {
       reportUsage({
         feature: 'viral-learner',
-        provider: 'openai',
+        provider: AI_PROVIDER,
         model: data?.model || OPENAI_MODEL,
         promptTokens: usage.prompt_tokens,
         completionTokens: usage.completion_tokens,
