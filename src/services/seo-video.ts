@@ -2,7 +2,7 @@
  * SEO Video Service — 影片 SEO 文案 + YouTube 標題生成
  *
  * 流程：前端直傳 GCS → 服務端下載 → ffmpeg 抽音軌/截圖 →
- *       gpt-4o-mini-transcribe 轉錄（5 分鐘分段）→ gpt-5.6-terra 分析＋生成
+ *       faster-whisper 容器內轉錄 → gpt-5.6-terra 分析＋生成
  *
  * 2026-07-10 從 Gemini 全面遷移到 OpenAI：Google 帳務事故後所有 Gemini key
  * 作廢（400 API_KEY_INVALID），Karen 拍板改用 gpt-5.6-terra（5.6 家族中階層）。
@@ -10,16 +10,25 @@
  * video ✗ audio ✗，實測丟 mp4 回 400 invalid_image_format），故影片理解改為
  * 「轉錄文字＋畫面截圖」組合。
  *
- * 生成: gpt-5.6-terra（$2.5/$15 per 1M，cached input $0.25）
+ * 2026-08-14 全面脫離 OpenAI 按量計費：
+ *   - 文字生成 → ChatGPT 訂閱橋接（見 aiGateway.ts）
+ *   - 音軌轉錄 → 容器內 faster-whisper（見 scripts/transcribe.py）
+ * 起因是按量帳號餘額歸零（429 credit_balance_exhausted），轉錄整條是壞的。
+ * 訂閱端點沒有轉錄介面，所以轉錄不是「改省錢」而是「改成能跑」。
+ * 本檔案已不再需要 OPENAI_API_KEY。
+ *
+ * 生成: gpt-5.6-terra（走訂閱額度，成本 0）
  * 審核: gpt-5.6-terra NLP 審核
+ * 轉錄: faster-whisper large-v3-turbo（容器內 CPU，免費）
  * 編號: YouTube Data API v3
  */
 
 import { Storage } from '@google-cloud/storage';
 import { createClient } from '@supabase/supabase-js';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { createInterface } from 'node:readline';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { selectDiverseSkeletons, buildDiversityConstraint, getRecentDNA, recordDNA } from './dna-tracker.js';
@@ -32,9 +41,6 @@ import { AI_CHAT_URL, AI_CHAT_KEY, AI_PROVIDER } from './aiGateway.js';
 
 const GCS_BUCKET_NAME = 'singple-seo-videos';
 
-// 轉錄仍打真正的 OpenAI（訂閱額度沒有轉錄介面），所以保留這把真金鑰。
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
 const YOUTUBE_CHANNEL_ID = 'UCo3Z0bh4OnwPL5z4rMwNqbg';
 
@@ -42,9 +48,13 @@ const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
 const OPENAI_MODEL = 'gpt-5.6-terra';
-const TRANSCRIBE_MODEL = 'gpt-4o-mini-transcribe';
-// gpt-4o transcribe 系列輸出 2048 token 上限會靜默截斷 → 音軌一律切 ≤5 分鐘段
-const AUDIO_CHUNK_SECONDS = 300;
+
+// 容器內轉錄。模型與參數在 scripts/transcribe.py，這裡只負責叫它。
+const TRANSCRIBE_SCRIPT = path.join(
+  path.dirname(new URL(import.meta.url).pathname),
+  '..', '..', 'scripts', 'transcribe.py',
+);
+const PYTHON_BIN = process.env.PYTHON_BIN || '/opt/venv/bin/python3';
 
 const execFileAsync = promisify(execFile);
 
@@ -110,7 +120,10 @@ async function callLuna(
   feature = 'seo-video',
   imageDataUrls: string[] = [],
 ): Promise<string> {
-  if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY 未設定');
+  // 檢查實際會用到的那把（走橋接是 AI_GATEWAY_KEY，沒設才退回 OPENAI_API_KEY）。
+  // 以前這裡檢查 OPENAI_API_KEY，但呼叫時用的是 AI_CHAT_KEY——只設橋接金鑰時
+  // 會誤報「未設定」讓功能整個不能用。
+  if (!AI_CHAT_KEY) throw new Error('AI_GATEWAY_KEY / OPENAI_API_KEY 皆未設定');
 
   const userContent: unknown = imageDataUrls.length
     ? [
@@ -178,16 +191,19 @@ async function ffprobeDuration(file: string): Promise<number> {
   return Number.isFinite(d) ? d : 0;
 }
 
-/** 抽音軌 → 單聲道 16kHz 64kbps mp3，按 AUDIO_CHUNK_SECONDS 分段 */
-async function extractAudioChunks(videoPath: string, dir: string): Promise<string[]> {
+/** 抽音軌 → 單聲道 16kHz WAV（whisper 的原生格式，不再經過一次有損壓縮）。
+ *
+ * 以前切成 5 分鐘一段是因為 gpt-4o transcribe 輸出有 2048 token 上限、超過會
+ * 靜默截斷。本地模型沒這個上限，所以整支一次轉，讓模型保有完整上下文。
+ * 一小時的影片約 115MB WAV，跟原始影片比起來不算什麼。 */
+async function extractAudio(videoPath: string, dir: string): Promise<string> {
+  const out = path.join(dir, 'audio.wav');
   await execFileAsync('ffmpeg', [
     '-y', '-i', videoPath,
-    '-vn', '-ac', '1', '-ar', '16000', '-b:a', '64k',
-    '-f', 'segment', '-segment_time', String(AUDIO_CHUNK_SECONDS), '-reset_timestamps', '1',
-    path.join(dir, 'audio-%03d.mp3'),
+    '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le',
+    out,
   ], { timeout: 600000 });
-  const files = (await readdir(dir)).filter((f) => f.startsWith('audio-') && f.endsWith('.mp3')).sort();
-  return files.map((f) => path.join(dir, f));
+  return out;
 }
 
 /** 抽 2 張畫面截圖（720px 寬 jpeg）給 terra 看畫面；失敗不阻擋（轉錄文字才是主體） */
@@ -210,35 +226,86 @@ async function extractFrames(videoPath: string, dir: string, duration: number): 
   return out;
 }
 
-/** 單段音訊 → gpt-4o-mini-transcribe 逐字稿 */
-async function transcribeChunk(file: string): Promise<{ text: string; inputTokens: number | null; outputTokens: number | null }> {
-  const buf = await readFile(file);
-  const fd = new FormData();
-  fd.append('file', new Blob([new Uint8Array(buf)], { type: 'audio/mpeg' }), path.basename(file));
-  fd.append('model', TRANSCRIBE_MODEL);
-  fd.append('response_format', 'json');
+/** 音檔 → 逐字稿（容器內 faster-whisper，不打外部 API、不花錢）。
+ *
+ * 用 spawn 而不是 execFile：execFile 會等程式跑完才把 stdout 交出來，長影片
+ * 就完全沒有中途進度。而 seo-routes 有「30 分鐘沒更新 updated_at 就判定殭屍」
+ * 的守衛，一支一小時的影片轉到一半會被自己人判死。所以這裡逐行讀進度，
+ * 每前進一段就回報一次。 */
+export async function transcribeAudio(
+  audioPath: string,
+  durationSec: number,
+  onSeconds?: (seconds: number) => void,
+): Promise<string> {
+  // 沒有固定總時限，改用「閒置看門狗」：只要還在吐進度就讓它跑，
+  // 連續 10 分鐘沒有任何輸出才判定卡死。這樣既不會誤殺長影片，
+  // 也不會讓真的當掉的程序無限期佔著任務。
+  const IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 300000);
-  try {
-    const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
-      body: fd,
-      signal: controller.signal,
+  return await new Promise<string>((resolve, reject) => {
+    const child = spawn(PYTHON_BIN, [TRANSCRIBE_SCRIPT, audioPath], {
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
-    const data = await res.json() as Record<string, any>;
-    if (!res.ok || typeof data?.text !== 'string') {
-      throw new Error(`transcribe HTTP ${res.status}: ${JSON.stringify(data).substring(0, 200)}`);
-    }
-    return {
-      text: data.text,
-      inputTokens: data?.usage?.input_tokens ?? null,
-      outputTokens: data?.usage?.output_tokens ?? null,
+
+    let text: string | null = null;
+    let settled = false;
+    let stderrTail = '';
+    let idleTimer: NodeJS.Timeout;
+
+    const finish = (err: Error | null, value?: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(idleTimer);
+      if (err) reject(err); else resolve(value as string);
     };
-  } finally {
-    clearTimeout(timeout);
-  }
+
+    const resetIdle = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        child.kill('SIGKILL');
+        finish(new Error(`轉錄逾時：連續 ${IDLE_TIMEOUT_MS / 60000} 分鐘沒有進度`));
+      }, IDLE_TIMEOUT_MS);
+    };
+    resetIdle();
+
+    createInterface({ input: child.stdout }).on('line', (line) => {
+      resetIdle();
+      if (!line.trim()) return;
+      let msg: Record<string, any>;
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        // 轉錄腳本以外的雜訊（套件的 warning 之類）直接忽略，不要讓它毒死整包
+        return;
+      }
+      if (msg.type === 'progress' && typeof msg.seconds === 'number') {
+        onSeconds?.(msg.seconds);
+      } else if (msg.type === 'result') {
+        text = typeof msg.text === 'string' ? msg.text : '';
+        console.log(`[SEO] 轉錄完成：${text.length} 字（音檔 ${msg.duration}s / 影片 ${Math.round(durationSec)}s）`);
+      }
+    });
+
+    // stderr 只留尾巴——模型會印一堆 warning，全部收下來只會塞爆記憶體，
+    // 但出錯時又需要最後那幾行才知道原因。
+    child.stderr.on('data', (buf: Buffer) => {
+      stderrTail = (stderrTail + buf.toString()).slice(-2000);
+    });
+
+    child.on('error', (err) => finish(new Error(`轉錄程序啟動失敗：${err.message}`)));
+
+    child.on('close', (code) => {
+      if (code !== 0) {
+        finish(new Error(`轉錄程序結束碼 ${code}：${stderrTail.trim().slice(-500) || '（無錯誤訊息）'}`));
+        return;
+      }
+      if (text === null) {
+        finish(new Error(`轉錄程序沒有回傳結果：${stderrTail.trim().slice(-500) || '（無錯誤訊息）'}`));
+        return;
+      }
+      finish(null, text);
+    });
+  });
 }
 
 function parseJsonResponse(text: string): any {
@@ -275,27 +342,25 @@ export async function analyzeVideo(
     console.log(`[SEO] video downloaded: ${objectPath} (${Math.round(duration)}s)`);
 
     // 轉錄（GPT-5.6 家族不吃音訊 → 音軌轉成文字才是內容主體）
-    await updateJobProgress(jobId, 12, 'transcribing', `抽取音軌並轉錄中（片長 ${Math.round(duration)} 秒）...`, onProgress);
-    const chunks = await extractAudioChunks(videoPath, workDir);
-    if (!chunks.length) throw new Error('ffmpeg 抽不出音軌（影片可能沒有聲音）');
+    // 容器內跑 faster-whisper，不打外部 API，所以沒有 reportUsage——
+    // 這符合 repo CLAUDE.md 記帳鐵律的例外條款（本地免費模型，同 ollama / MLX）。
+    await updateJobProgress(jobId, 12, 'transcribing', `抽取音軌中（片長 ${Math.round(duration)} 秒）...`, onProgress);
+    const audioPath = await extractAudio(videoPath, workDir);
 
-    const parts: string[] = [];
-    for (const chunk of chunks) {
-      const r = await transcribeChunk(chunk);
-      parts.push(r.text);
-      reportUsage({
-        feature: 'seo-video-transcribe',
-        // 轉錄仍走真正的 OpenAI API（訂閱額度沒有轉錄介面），所以還是按量計費。
-        // 改用容器內 faster-whisper 之後，這裡要一起改成免費/不計費。
-        provider: 'openai',
-        model: TRANSCRIBE_MODEL,
-        promptTokens: r.inputTokens,
-        completionTokens: r.outputTokens,
-        estimated: r.inputTokens == null,
-        meta: { chunkSeconds: Math.min(AUDIO_CHUNK_SECONDS, Math.round(duration)) },
-      });
-    }
-    const transcript = parts.join('\n').trim();
+    // 進度條 12% → 40% 對應轉錄進度，讓長影片看得出來還在動
+    // （同時每次更新都會刷新 updated_at，避開殭屍任務判定）。
+    const transcript = (
+      await transcribeAudio(audioPath, duration, (seconds) => {
+        const ratio = duration > 0 ? Math.min(seconds / duration, 1) : 0;
+        void updateJobProgress(
+          jobId,
+          12 + Math.round(ratio * 28),
+          'transcribing',
+          `轉錄中 ${Math.round(seconds)} / ${Math.round(duration)} 秒...`,
+          onProgress,
+        ).catch(() => {});
+      })
+    ).trim();
     if (!transcript) throw new Error('轉錄結果為空（影片沒有可辨識的人聲）');
 
     // 截圖給 terra 看畫面（輔助判斷影片類型；失敗不阻擋）

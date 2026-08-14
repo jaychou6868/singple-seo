@@ -11,8 +11,9 @@
 // 這樣「部署程式碼」和「實際切換」就分開了：先部署不會有任何影響，
 // 等環境變數設好才生效；要回退也只要刪掉 AI_GATEWAY_KEY，不用重新部署。
 //
-// ⚠️ 音軌轉錄（/v1/audio/transcriptions）不走這裡——訂閱額度沒有轉錄介面。
-//    那條仍用真正的 OPENAI_API_KEY，見 seo-video.ts 的 transcribeChunk。
+// ⚠️ 音軌轉錄不走這裡，也已經不打任何外部 API——訂閱額度沒有轉錄介面，
+//    所以改成容器內跑 faster-whisper（見 scripts/transcribe.py）。
+//    本服務因此完全不需要 OPENAI_API_KEY 了。
 // ---------------------------------------------------------------------------
 
 const OPENAI_DIRECT = 'https://api.openai.com/v1/chat/completions';

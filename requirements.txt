@@ -1,0 +1,12 @@
+# 容器內語音轉錄（scripts/transcribe.py）。
+# 只有這一個用途——本服務其餘部分都是 Node。
+#
+# 版本鎖死：faster-whisper 的模型名稱對應表（large-v3-turbo →
+# mobiuslabsgmbh/faster-whisper-large-v3-turbo）是跟著版本走的，Dockerfile
+# 烘模型時依賴這張表，浮動版本可能讓建置期抓到不同的權重。
+faster-whisper==1.2.1
+
+# 簡體 → 台灣繁體。純 Python 實作，不用編譯。
+# 必要性見 scripts/transcribe.py 檔頭：whisper 的中文輸出是簡體，
+# 但逐字稿會直接顯示給 Karen 看。
+opencc-python-reimplemented==0.1.7

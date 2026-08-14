@@ -25,7 +25,10 @@ export interface UsageReport {
   feature: string;
   // chatgpt-subscription：2026-08-14 起文字生成改走 singple-chatgpt-bridge
   // （Karen 的 ChatGPT Team 訂閱額度，成本 0）。主站 ingest 白名單已同步新增。
-  // 音軌轉錄仍是 'openai'——訂閱額度沒有轉錄介面，那條還在按量計費。
+  //
+  // 音軌轉錄不在這個列舉裡：它已改成容器內跑 faster-whisper，不打外部 API，
+  // 按記帳鐵律的本地免費模型例外（同 ollama／MLX）不埋點。
+  // ⚠️ 若哪天轉錄又改回打外部 API，必須同時把埋點加回來——這是漏帳最容易發生的地方。
   provider: 'openai' | 'gemini' | 'chatgpt-subscription';
   model: string;
   promptTokens?: number | null;
