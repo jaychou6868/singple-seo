@@ -705,6 +705,16 @@ async function getNextEpisodeNumber(): Promise<number | null> {
     const res = await fetch(url);
     const data = await res.json() as any;
 
+    // YouTube 回 4xx 時 fetch 不會 throw，錯誤只在 body 裡；不明講就會像
+    // 2026-07-10～08-14 那樣：金鑰過期整整一個月，標題默默變 #???，日誌一行都沒有。
+    if (!res.ok || data.error) {
+      console.error(
+        `[SEO] YouTube 取集數失敗 (HTTP ${res.status})：`,
+        data?.error?.message || JSON.stringify(data).slice(0, 200),
+      );
+      return null;
+    }
+
     let maxNum = 0;
     for (const item of data.items || []) {
       const match = item.snippet?.title?.match(/#(\d+)/);
