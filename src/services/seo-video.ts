@@ -44,6 +44,9 @@ const GCS_BUCKET_NAME = 'singple-seo-videos';
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
 const YOUTUBE_CHANNEL_ID = 'UCo3Z0bh4OnwPL5z4rMwNqbg';
 
+/** 頻道後綴「｜簡單歌唱 Singple. #xxx」——半形直線也認，一路剪到結尾。 */
+const CHANNEL_SUFFIX = /\s*[｜|]\s*簡單歌唱\s*Singple\.?.*$/;
+
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
@@ -606,7 +609,8 @@ ${_nlpHintBlock}
 ## 嚴格規則
 1. 5 個標題分別用這 5 種切入角度：${angleText}
 2. 5 個標題分別用不同的骨架結構
-3. 每個標題 ≤ 42 個字元（後面要加「｜簡單歌唱 Singple. #xxx」）
+3. 每個標題 ≤ 42 個字元。標題本身**絕對不要**寫「｜簡單歌唱 Singple. #xxx」——
+   系統會自動接上去，你自己寫等於接兩次
 4. 禁止：四字成語對仗、「掌握/解鎖/開啟/蛻變」、空泛承諾、過度完美句式
 5. 必須有：口語詞或具體場景
 6. 標題承諾 ≤ 內容實際教的
@@ -832,7 +836,13 @@ export async function processVideoSeo(
     ? `｜簡單歌唱 Singple. #${episodeNumber}`
     : '｜簡單歌唱 Singple. #???';
   for (const t of titles) {
-    t.full_title = `${t.title}${suffix}`;
+    // 模型有時會自己把頻道後綴寫進 title（7/10 換 terra 之後開始），程式再接一次就變成
+    // 「…#喉嚨痛｜簡單歌唱 Singple. #825」。prompt 已明講不要寫，但這裡照樣剪乾淨再接：
+    // 更關鍵的是 t.title 會被存進 title_tracker 當「最近用過的」餵回下一輪 prompt，
+    // 不在這裡洗掉，模型就會一直看到帶後綴的範例、學著繼續寫。
+    const base = String(t.title ?? '').replace(CHANNEL_SUFFIX, '').trim();
+    t.title = base;
+    t.full_title = `${base}${suffix}`;
     t.episode_number = episodeNumber;
   }
 
