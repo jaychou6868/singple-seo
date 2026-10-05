@@ -36,6 +36,7 @@ import type { CaptionDNA } from './dna-tracker.js';
 import { preHint, postReview } from './nlp_kb_client.js';
 import { reportUsage } from './usage-reporter.js';
 import { AI_CHAT_URL, AI_CHAT_KEY, AI_PROVIDER } from './aiGateway.js';
+import { maxEpisodeFromTitles, uploadsPlaylistUrl } from './episode-number.js';
 
 // ── Config ──────────────────────────────────────────────────
 
@@ -705,7 +706,9 @@ async function getNextEpisodeNumber(): Promise<number | null> {
   if (!YOUTUBE_API_KEY) return null;
 
   try {
-    const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${YOUTUBE_CHANNEL_ID}&order=date&maxResults=5&type=video&key=${YOUTUBE_API_KEY}`;
+    // 2026-10-05 oneflow：改讀頻道「上傳」清單（playlistItems，1 配額）。search.list 100 配額、而且索引常漏最新片
+    // （9/28–10/1 頻道最新已是 #839，標題還拿到 #831）。
+    const url = uploadsPlaylistUrl(YOUTUBE_CHANNEL_ID, YOUTUBE_API_KEY);
     const res = await fetch(url);
     const data = await res.json() as any;
 
@@ -719,16 +722,14 @@ async function getNextEpisodeNumber(): Promise<number | null> {
       return null;
     }
 
-    let maxNum = 0;
-    for (const item of data.items || []) {
-      const match = item.snippet?.title?.match(/#(\d+)/);
-      if (match) maxNum = Math.max(maxNum, parseInt(match[1]));
-    }
+    // 只認標題結尾的固定後綴「｜簡單歌唱 Singple. #843」；標題中間的 #數字不算
+    const maxNum = maxEpisodeFromTitles((data.items || []).map((it: any) => it.snippet?.title));
 
     if (maxNum > 0) {
       console.log(`[SEO] YouTube latest: #${maxNum} → next: #${maxNum + 1}`);
       return maxNum + 1;
     }
+    console.warn('[SEO] YouTube 上傳清單最新 15 支都沒有「｜簡單歌唱 Singple. #數字」結尾的標題，這次不給集數（標題會是 #???）');
   } catch (err) {
     console.error('YouTube API error:', err);
   }
