@@ -13,6 +13,7 @@ import { nanoid } from 'nanoid';
 import { extractPatterns } from './nlp_kb_client.js';
 import { reportUsage } from './usage-reporter.js';
 import { AI_CHAT_URL, AI_CHAT_KEY, AI_PROVIDER } from './aiGateway.js';
+import { fixSourChar } from './sour-char.js';
 
 // ── Config ──────────────────────────────────────────────────
 
@@ -273,7 +274,7 @@ ${titlesText}
     }
 
     // Parse JSON from response
-    const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
+    const cleaned = fixSourChar(text).replace(/```json/g, '').replace(/```/g, '').trim();
     try {
       return JSON.parse(cleaned);
     } catch {

@@ -37,6 +37,7 @@ import { preHint, postReview } from './nlp_kb_client.js';
 import { reportUsage } from './usage-reporter.js';
 import { AI_CHAT_URL, AI_CHAT_KEY, AI_PROVIDER } from './aiGateway.js';
 import { maxEpisodeFromTitles, uploadsPlaylistUrl } from './episode-number.js';
+import { fixSourChar } from './sour-char.js';
 
 // ── Config ──────────────────────────────────────────────────
 
@@ -176,7 +177,7 @@ async function callLuna(
     if (!res.ok || !text) {
       throw new Error(`${OPENAI_MODEL} returned no text: ${JSON.stringify(data).substring(0, 200)}`);
     }
-    return text;
+    return fixSourChar(text);
   } finally {
     clearTimeout(timeout);
   }
@@ -461,6 +462,7 @@ ${exampleText}
 - Hook 不能超過 20 個中文字
 - 不能堆砌關鍵字
 - 不能用「大家好」開頭
+- 身體痠痛一律寫『酸』（酸痛、喉嚨酸），不寫『痠』。
 - 最近用過的 hook 類型（避免重複）：${recentHooks.slice(-5).join(', ')}
 ${diversityConstraint}
 
@@ -616,6 +618,7 @@ ${_nlpHintBlock}
 5. 必須有：口語詞或具體場景
 6. 標題承諾 ≤ 內容實際教的
 7. 不能像 AI 公式化產出
+8. 身體痠痛一律寫『酸』（酸痛、喉嚨酸），不寫『痠』。
 
 ## 骨架結構
 ${skeletonText}
