@@ -137,7 +137,8 @@ def to_traditional(text):
     try:
         from opencc import OpenCC
 
-        return OpenCC("s2twp").convert(text)
+        # s2twp 會把「酸痛」轉成「痠痛」；觀眾看得到的字一律寫「酸」（Karen 2026-10-20 定案）
+        return OpenCC("s2twp").convert(text).replace("痠", "酸")
     except Exception as err:  # noqa: BLE001
         print(f"[transcribe] OpenCC 轉繁體失敗，輸出保持原樣: {err}", file=sys.stderr)
         return text
