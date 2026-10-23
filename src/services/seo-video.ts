@@ -36,7 +36,7 @@ import type { CaptionDNA } from './dna-tracker.js';
 import { preHint, postReview } from './nlp_kb_client.js';
 import { reportUsage } from './usage-reporter.js';
 import { AI_CHAT_URL, AI_CHAT_KEY, AI_PROVIDER } from './aiGateway.js';
-import { maxEpisodeFromTitles, uploadsPlaylistUrl } from './episode-number.js';
+import { CHANNEL_SUFFIX, EPISODE_TAIL_PREFIX, maxEpisodeFromTitles, uploadsPlaylistUrl } from './episode-number.js';
 import { fixSourChar } from './sour-char.js';
 
 // ── Config ──────────────────────────────────────────────────
@@ -46,8 +46,6 @@ const GCS_BUCKET_NAME = 'singple-seo-videos';
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
 const YOUTUBE_CHANNEL_ID = 'UCo3Z0bh4OnwPL5z4rMwNqbg';
 
-/** 頻道後綴「｜簡單歌唱 Singple. #xxx」——半形直線也認，一路剪到結尾。 */
-const CHANNEL_SUFFIX = /\s*[｜|]\s*簡單歌唱\s*Singple\.?.*$/;
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
@@ -612,7 +610,7 @@ ${_nlpHintBlock}
 ## 嚴格規則
 1. 5 個標題分別用這 5 種切入角度：${angleText}
 2. 5 個標題分別用不同的骨架結構
-3. 每個標題 ≤ 42 個字元。標題本身**絕對不要**寫「｜簡單歌唱 Singple. #xxx」——
+3. 每個標題 ≤ 42 個字元。標題本身**絕對不要**寫「｜簡單歌唱 EPxxx」——
    系統會自動接上去，你自己寫等於接兩次
 4. 禁止：四字成語對仗、「掌握/解鎖/開啟/蛻變」、空泛承諾、過度完美句式
 5. 必須有：口語詞或具體場景
@@ -725,14 +723,14 @@ async function getNextEpisodeNumber(): Promise<number | null> {
       return null;
     }
 
-    // 只認標題結尾的固定後綴「｜簡單歌唱 Singple. #843」；標題中間的 #數字不算
+    // 只認標題結尾的固定後綴：新「｜簡單歌唱 EP854」或舊「｜簡單歌唱 Singple. #843」；標題中間的 #數字不算
     const maxNum = maxEpisodeFromTitles((data.items || []).map((it: any) => it.snippet?.title));
 
     if (maxNum > 0) {
-      console.log(`[SEO] YouTube latest: #${maxNum} → next: #${maxNum + 1}`);
+      console.log(`[SEO] YouTube latest: EP${maxNum} → next: EP${maxNum + 1}`);
       return maxNum + 1;
     }
-    console.warn('[SEO] YouTube 上傳清單最新 15 支都沒有「｜簡單歌唱 Singple. #數字」結尾的標題，這次不給集數（標題會是 #???）');
+    console.warn('[SEO] YouTube 上傳清單最新 15 支都沒有「｜簡單歌唱 EP數字」（或舊的「Singple. #數字」）結尾的標題，這次不給集數（標題會是 EP???）');
   } catch (err) {
     console.error('YouTube API error:', err);
   }
@@ -837,8 +835,8 @@ export async function processVideoSeo(
 
   // Add suffix to titles
   const suffix = episodeNumber
-    ? `｜簡單歌唱 Singple. #${episodeNumber}`
-    : '｜簡單歌唱 Singple. #???';
+    ? `${EPISODE_TAIL_PREFIX}${episodeNumber}`
+    : `${EPISODE_TAIL_PREFIX}???`;
   for (const t of titles) {
     // 模型有時會自己把頻道後綴寫進 title（7/10 換 terra 之後開始），程式再接一次就變成
     // 「…#喉嚨痛｜簡單歌唱 Singple. #825」。prompt 已明講不要寫，但這裡照樣剪乾淨再接：
