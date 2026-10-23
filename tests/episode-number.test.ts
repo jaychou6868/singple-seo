@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { EPISODE_SUFFIX_RE, maxEpisodeFromTitles, uploadsPlaylistUrl } from '../src/services/episode-number.js';
+import { CHANNEL_SUFFIX, EPISODE_SUFFIX_RE, EPISODE_TAIL_PREFIX, maxEpisodeFromTitles, uploadsPlaylistUrl } from '../src/services/episode-number.js';
 
 test('結尾固定後綴才算序號', () => {
   assert.equal(maxEpisodeFromTitles(['高音不用天分｜簡單歌唱 Singple. #842']), 842);
@@ -38,8 +38,31 @@ test('空陣列、null、undefined、非字串 → 0', () => {
   assert.equal(maxEpisodeFromTitles([842 as unknown as string]), 0);
 });
 
+test('新格式 EP（2026-10-23 起）也認；新舊混著取最大', () => {
+  assert.equal(maxEpisodeFromTitles(['高音不用天分｜簡單歌唱 EP854']), 854);
+  assert.equal(maxEpisodeFromTitles(['新片｜簡單歌唱 EP854', '舊片｜簡單歌唱 Singple. #853']), 854);
+  assert.equal(maxEpisodeFromTitles(['3 個技巧 #900｜簡單歌唱 EP854  ']), 854);
+  // 沒有「｜簡單歌唱」、後面還有字、還沒給號的 EP??? → 不算
+  assert.equal(maxEpisodeFromTitles(['沒前綴 EP900', '｜簡單歌唱 EP900 後面還有字', '還沒給號｜簡單歌唱 EP???']), 0);
+});
+
+test('新片結尾一律產 EP', () => {
+  assert.equal(EPISODE_TAIL_PREFIX, '｜簡單歌唱 EP');
+  const src = readFileSync(new URL('../src/services/seo-video.ts', import.meta.url), 'utf8');
+  assert.ok(!src.includes('｜簡單歌唱 Singple. #${'), '還在產舊的「Singple. #」結尾');
+  assert.ok(src.includes('`${EPISODE_TAIL_PREFIX}${episodeNumber}`'));
+});
+
+test('模型自己寫的頻道後綴（新舊都）剪乾淨', () => {
+  const strip = (t: string) => t.replace(CHANNEL_SUFFIX, '').trim();
+  assert.equal(strip('喉嚨痛怎麼辦｜簡單歌唱 Singple. #825'), '喉嚨痛怎麼辦');
+  assert.equal(strip('喉嚨痛怎麼辦｜簡單歌唱 EP854'), '喉嚨痛怎麼辦');
+  assert.equal(strip('喉嚨痛怎麼辦 | 簡單歌唱 EP???'), '喉嚨痛怎麼辦');
+  assert.equal(strip('沒有後綴的標題'), '沒有後綴的標題');
+});
+
 test('EPISODE_SUFFIX_RE 跟主站、產線同一個規則', () => {
-  assert.equal(EPISODE_SUFFIX_RE.source, '｜簡單歌唱 Singple\\.? #(\\d+)\\s*$');
+  assert.equal(EPISODE_SUFFIX_RE.source, '｜簡單歌唱(?: Singple\\.?)? ?(?:#|EP)(\\d+)\\s*$');
   assert.equal(EPISODE_SUFFIX_RE.global, false); // 不能有 g：exec 會記住上次位置
 });
 
@@ -56,7 +79,7 @@ test('上傳清單網址：UC 換成 UU、part=snippet、maxResults=15、不是 
 
 test('seo-video.ts 的 getNextEpisodeNumber 改用上傳清單（讀原始碼檢查接線）', () => {
   const src = readFileSync(new URL('../src/services/seo-video.ts', import.meta.url), 'utf8');
-  assert.match(src, /import \{ maxEpisodeFromTitles, uploadsPlaylistUrl \} from '\.\/episode-number\.js';/);
+  assert.match(src, /import \{ CHANNEL_SUFFIX, EPISODE_TAIL_PREFIX, maxEpisodeFromTitles, uploadsPlaylistUrl \} from '\.\/episode-number\.js';/);
   const start = src.indexOf('async function getNextEpisodeNumber()');
   assert.ok(start >= 0, '找不到 getNextEpisodeNumber');
   const body = src.slice(start, src.indexOf('\n}\n', start));

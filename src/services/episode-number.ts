@@ -1,6 +1,12 @@
 // YouTube 標題序號（2026-10-05 oneflow）：只認標題結尾的固定後綴。
 // 這支模組沒有任何副作用（不讀 env、不連資料庫、不打網路），測試可以直接 import。
-export const EPISODE_SUFFIX_RE = /｜簡單歌唱 Singple\.? #(\d+)\s*$/;
+// 2026-10-23 Karen 定：結尾的「#853」在 YouTube 會變成可點的 hashtag（把人帶去不相關的影片）→ 新片一律「｜簡單歌唱 EP854」；
+// 舊片標題「｜簡單歌唱 Singple. #843」不改，所以新舊都認（跟主站 src/lib/ytEpisodeCore.ts、產線 youtube_title_generator.py 同一條）。
+export const EPISODE_SUFFIX_RE = /｜簡單歌唱(?: Singple\.?)? ?(?:#|EP)(\d+)\s*$/;
+/** 新片標題結尾（接號碼） */
+export const EPISODE_TAIL_PREFIX = '｜簡單歌唱 EP';
+/** 模型自己寫進標題的頻道後綴（新「｜簡單歌唱 EP854」、舊「｜簡單歌唱 Singple. #xxx」）——半形直線也認，一路剪到結尾。 */
+export const CHANNEL_SUFFIX = /\s*[｜|]\s*簡單歌唱\s*(?:Singple|EP).*$/;
 
 /** 一組標題裡結尾後綴的最大號；都沒有 → 0 */
 export function maxEpisodeFromTitles(titles: Array<string | null | undefined>): number {
