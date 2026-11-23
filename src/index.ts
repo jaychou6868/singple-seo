@@ -10,7 +10,13 @@ const app = new Hono();
 
 // Allow cross-origin from main site
 app.use('*', cors({
-  origin: ['https://singple-marketing.zeabur.app', 'http://localhost:3000'],
+  // 11/23 搬家：後台改在 marketing／learn.thisissingple.com，舊網址留著不影響
+  origin: [
+    'https://marketing.thisissingple.com',
+    'https://learn.thisissingple.com',
+    'https://singple-marketing.zeabur.app',
+    'http://localhost:3000',
+  ],
   credentials: true,
 }));
 
