@@ -29,6 +29,7 @@ export interface UsageReport {
   // 音軌轉錄不在這個列舉裡：它已改成容器內跑 faster-whisper，不打外部 API，
   // 按記帳鐵律的本地免費模型例外（同 ollama／MLX）不埋點。
   // ⚠️ 若哪天轉錄又改回打外部 API，必須同時把埋點加回來——這是漏帳最容易發生的地方。
+  // 2026-11-23：TRANSCRIBE_BACKEND=openai 時轉錄走 OpenAI，seo-video.ts 每段以 provider 'openai' 埋點。
   provider: 'openai' | 'gemini' | 'chatgpt-subscription';
   model: string;
   promptTokens?: number | null;

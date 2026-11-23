@@ -15,7 +15,7 @@
  *   - 音軌轉錄 → 容器內 faster-whisper（見 scripts/transcribe.py）
  * 起因是按量帳號餘額歸零（429 credit_balance_exhausted），轉錄整條是壞的。
  * 訂閱端點沒有轉錄介面，所以轉錄不是「改省錢」而是「改成能跑」。
- * 本檔案已不再需要 OPENAI_API_KEY。
+ * 預設不需要 OPENAI_API_KEY；只有 TRANSCRIBE_BACKEND=openai（2026-11-23 新主機）轉錄才用到。
  *
  * 生成: gpt-5.6-terra（走訂閱額度，成本 0）
  * 審核: gpt-5.6-terra NLP 審核
@@ -35,6 +35,7 @@ import { selectDiverseSkeletons, buildDiversityConstraint, getRecentDNA, recordD
 import type { CaptionDNA } from './dna-tracker.js';
 import { preHint, postReview } from './nlp_kb_client.js';
 import { reportUsage } from './usage-reporter.js';
+import { TRANSCRIBE_BACKEND, transcribeVideoOpenAI } from './transcribe-openai.js';
 import { AI_CHAT_URL, AI_CHAT_KEY, AI_PROVIDER } from './aiGateway.js';
 import { CHANNEL_SUFFIX, EPISODE_TAIL_PREFIX, maxEpisodeFromTitles, uploadsPlaylistUrl } from './episode-number.js';
 import { fixSourChar } from './sour-char.js';
@@ -58,6 +59,8 @@ const TRANSCRIBE_SCRIPT = path.join(
   '..', '..', 'scripts', 'transcribe.py',
 );
 const PYTHON_BIN = process.env.PYTHON_BIN || '/opt/venv/bin/python3';
+
+// 轉錄後端開關（TRANSCRIBE_BACKEND=openai）見 transcribe-openai.ts
 
 const execFileAsync = promisify(execFile);
 
@@ -351,7 +354,8 @@ export async function analyzeVideo(
     // 容器內跑 faster-whisper，不打外部 API，所以沒有 reportUsage——
     // 這符合 repo CLAUDE.md 記帳鐵律的例外條款（本地免費模型，同 ollama / MLX）。
     await updateJobProgress(jobId, 12, 'transcribing', `抽取音軌中（片長 ${Math.round(duration)} 秒）...`, onProgress);
-    const audioPath = await extractAudio(videoPath, workDir);
+    const useOpenAI = TRANSCRIBE_BACKEND === 'openai';
+    const audioPath = useOpenAI ? '' : await extractAudio(videoPath, workDir);
 
     // 進度條 12% → 40% 對應轉錄進度，讓長影片看得出來還在動
     // （同時每次更新都會刷新 updated_at，避開殭屍任務判定）。
@@ -361,8 +365,7 @@ export async function analyzeVideo(
     //    30% → 40% → 32% → 34% 來回跳，看起來像壞掉。
     let writing = false;
     let lastWriteAt = 0;
-    const transcript = (
-      await transcribeAudio(audioPath, duration, (seconds) => {
+    const onSeconds = (seconds: number) => {
         const now = Date.now();
         if (writing || now - lastWriteAt < 5000) return;
         writing = true;
@@ -375,7 +378,11 @@ export async function analyzeVideo(
           `轉錄中 ${Math.round(seconds)} / ${Math.round(duration)} 秒...`,
           onProgress,
         ).catch(() => {}).finally(() => { writing = false; });
-      })
+    };
+    const transcript = (
+      useOpenAI
+        ? await transcribeVideoOpenAI(videoPath, workDir, duration, onSeconds)
+        : await transcribeAudio(audioPath, duration, onSeconds)
     ).trim();
     if (!transcript) throw new Error('轉錄結果為空（影片沒有可辨識的人聲）');
 
